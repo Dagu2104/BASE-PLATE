@@ -2052,6 +2052,237 @@ def module12_biaxial_grid_refinement(
         "bolt_tension_df": bolt_tension_df,
     }
 # ============================================================
+# MÓDULO 13 - CIERRE DEL DISEÑO Y REPORTE GLOBAL
+# ============================================================
+
+def module13_design_summary(
+    analysis_mode: str,
+    module2_results=None,
+    module4_results=None,
+    module5_results=None,
+    module6_results=None,
+    module7_results=None,
+    module8_results=None,
+    module9_results=None,
+    module10_results=None,
+    module11_results=None,
+    module12_results=None,
+) -> dict:
+    """
+    Módulo 13:
+    consolidación global de resultados.
+
+    Devuelve:
+    - tabla de chequeos
+    - estado global
+    - lista de módulos críticos
+    """
+
+    checks = []
+
+    def add_check(module_name, check_name, status, utilization=None, note=""):
+        checks.append({
+            "Módulo": module_name,
+            "Chequeo": check_name,
+            "Estado": status,
+            "Utilización": utilization,
+            "Nota": note,
+        })
+
+    # --------------------------------------------------------
+    # RAMA UNIAXIAL
+    # --------------------------------------------------------
+    if analysis_mode == "Uniaxial":
+
+        if module2_results is not None:
+            add_check(
+                "Módulo 2",
+                "Bearing bajo placa",
+                "Cumple" if module2_results["bearing_ok"] else "No cumple",
+                utilization=(module2_results["q_max_MPa"] / module2_results["q_allow_phi_MPa"]
+                             if module2_results["q_allow_phi_MPa"] > 0 else None),
+                note=f"Caso: {module2_results['case']}"
+            )
+
+        if module4_results is not None:
+            add_check(
+                "Módulo 4",
+                "Espesor de placa",
+                "Cumple" if module4_results["thickness_ok"] else "No cumple",
+                utilization=module4_results["utilization"],
+                note="tp >= t_req"
+            )
+
+        if module5_results is not None:
+            add_check(
+                "Módulo 5",
+                "Acero del anclaje - tensión",
+                "Cumple" if module5_results["tension_ok"] else "No cumple",
+                utilization=module5_results["tension_ratio"],
+            )
+            add_check(
+                "Módulo 5",
+                "Acero del anclaje - cortante",
+                "Cumple" if module5_results["shear_ok"] else "No cumple",
+                utilization=module5_results["shear_ratio"],
+            )
+            add_check(
+                "Módulo 5",
+                "Acero del anclaje - interacción",
+                "Cumple" if module5_results["interaction_ok"] else "No cumple",
+                utilization=module5_results["interaction_value"],
+            )
+
+        if module6_results is not None:
+            add_check(
+                "Módulo 6",
+                "Concreto en tensión",
+                "Cumple" if module6_results["concrete_tension_ok"] else "No cumple",
+                utilization=(module6_results["Nua_group_kN"] / module6_results["phiNn_cg_kN"]
+                             if module6_results["phiNn_cg_kN"] > 0 else None),
+                note="ACI 17 tensión"
+            )
+
+        if module7_results is not None:
+            add_check(
+                "Módulo 7",
+                "Concreto en cortante",
+                "Cumple" if module7_results["shear_concrete_ok"] else "No cumple",
+                utilization=(module7_results["Vua_group_kN"] / module7_results["phiVn_cg_kN"]
+                             if module7_results["phiVn_cg_kN"] > 0 else None),
+                note="ACI 17 cortante"
+            )
+            add_check(
+                "Módulo 7",
+                "Interacción concreta N-V",
+                "Cumple" if module7_results["interaction_concrete_ok"] else "No cumple",
+                utilization=module7_results["interaction_concrete"],
+            )
+
+        if module8_results is not None:
+            add_check(
+                "Módulo 8",
+                "Geometría mínima ACI 17.9",
+                "Cumple" if module8_results["geometric_ok"] else "No cumple",
+                utilization=None,
+                note=module8_results["geometry_rule_label"]
+            )
+
+        if module9_results is not None:
+            add_check(
+                "Módulo 9",
+                "Mecanismo de cortante en la base",
+                "Cumple" if module9_results["shear_ok"] else "No cumple",
+                utilization=module9_results["utilization"],
+                note=f"Mecanismo: {module9_results['selected_case']}"
+            )
+
+            if module9_results["shear_key_required"]:
+                add_check(
+                    "Módulo 9",
+                    "Necesidad de shear key",
+                    "Revisión requerida",
+                    utilization=None,
+                    note=f"Vu remanente = {module9_results['Vu_remaining_for_key_kN']:.3f} kN"
+                )
+
+        if module10_results is not None:
+            add_check(
+                "Módulo 10",
+                "Soldadura columna-placa",
+                "Cumple" if module10_results["col_weld_ok"] else "No cumple",
+                utilization=module10_results["col_weld_util"],
+            )
+
+            if module10_results["shear_key_required"]:
+                if module10_results["provide_shear_lug_weld"]:
+                    add_check(
+                        "Módulo 10",
+                        "Soldadura shear lug-placa",
+                        "Cumple" if module10_results["lug_weld_ok"] else "No cumple",
+                        utilization=module10_results["lug_weld_util"],
+                    )
+                else:
+                    add_check(
+                        "Módulo 10",
+                        "Soldadura shear lug-placa",
+                        "Revisión requerida",
+                        utilization=None,
+                        note="Se requiere shear key pero no se evaluó su soldadura"
+                    )
+
+    # --------------------------------------------------------
+    # RAMA BIAXIAL
+    # --------------------------------------------------------
+    elif analysis_mode == "Biaxial":
+
+        if module11_results is not None:
+            add_check(
+                "Módulo 11",
+                "Biaxial preliminar",
+                "Revisión requerida" if module11_results["possible_uplift"] else "Preliminarmente aceptable",
+                utilization=None,
+                note="Modelo elástico por esquinas"
+            )
+
+        if module12_results is not None:
+            residual_norm = max(
+                abs(module12_results["Mx_residual_kNm"]),
+                abs(module12_results["My_residual_kNm"]),
+            )
+
+            status = "Revisión requerida"
+            note = "Refinamiento por malla; aún no es equilibrio no lineal final"
+
+            if not module12_results["possible_uplift"]:
+                status = "Preliminarmente aceptable"
+
+            add_check(
+                "Módulo 12",
+                "Biaxial refinado por malla",
+                status,
+                utilization=None,
+                note=note
+            )
+
+            add_check(
+                "Módulo 12",
+                "Residual de equilibrio biaxial",
+                "Revisión requerida" if residual_norm > 1e-3 else "Aceptable",
+                utilization=residual_norm,
+                note="máx(|Mx_res|, |My_res|) [kN·m]"
+            )
+
+    # --------------------------------------------------------
+    # ESTADO GLOBAL
+    # --------------------------------------------------------
+    status_priority = {
+        "Cumple": 0,
+        "Preliminarmente aceptable": 1,
+        "Revisión requerida": 2,
+        "No cumple": 3,
+    }
+
+    if not checks:
+        global_status = "Sin resultados"
+        critical_checks = []
+    else:
+        worst = max(checks, key=lambda row: status_priority.get(row["Estado"], 99))
+        global_status = worst["Estado"]
+
+        critical_checks = [
+            row for row in checks
+            if row["Estado"] in ["No cumple", "Revisión requerida"]
+        ]
+
+    summary_df = pd.DataFrame(checks)
+
+    return {
+        "summary_df": summary_df,
+        "global_status": global_status,
+        "critical_checks": critical_checks,
+    }
+# ============================================================
 # FUNCIONES DE GRÁFICO
 # ============================================================
 
@@ -2854,10 +3085,27 @@ try:
         )
     else:
         module12_results = None
+
+    # --------------------------------------------------------
+    # MÓDULO 13
+    # --------------------------------------------------------
+    module13_results = module13_design_summary(
+        analysis_mode=analysis_mode,
+        module2_results=module2_results if analysis_mode == "Uniaxial" else None,
+        module4_results=module4_results if analysis_mode == "Uniaxial" else None,
+        module5_results=module5_results if analysis_mode == "Uniaxial" else None,
+        module6_results=module6_results if analysis_mode == "Uniaxial" else None,
+        module7_results=module7_results if analysis_mode == "Uniaxial" else None,
+        module8_results=module8_results if analysis_mode == "Uniaxial" else None,
+        module9_results=module9_results if analysis_mode == "Uniaxial" else None,
+        module10_results=module10_results if analysis_mode == "Uniaxial" else None,
+        module11_results=module11_results if analysis_mode == "Biaxial" else None,
+        module12_results=module12_results if analysis_mode == "Biaxial" else None,
+    )
     # --------------------------------------------------------
     # PESTAÑAS
     # --------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16 = st.tabs([
     "Datos y geometría",
     "Módulo 1 - Uniaxial",
     "Módulo 2 - Compresión",
@@ -2871,6 +3119,7 @@ try:
     "Módulo 10 - Soldadura",
     "Módulo 11 - Biaxial preliminar",
     "Módulo 12 - Biaxial refinado",
+    "Módulo 13 - Cierre",
     "Resumen",
     "Estado",
     ])
@@ -3557,17 +3806,49 @@ try:
                 "Aun así, no representa todavía la solución final exacta con equilibrio no lineal completo."
             )   
     with tab14:
-        st.subheader("Resumen")
-        st.write("Aquí puedes consolidar después un resumen global de chequeos uniaxiales y biaxiales.")
+        st.subheader("Módulo 13 - cierre del diseño")
 
+        st.markdown("### Resumen global de chequeos")
+        st.dataframe(
+            module13_results["summary_df"],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("### Estado global")
+
+        if module13_results["global_status"] == "Cumple":
+            st.success("Estado global: Cumple")
+        elif module13_results["global_status"] == "Preliminarmente aceptable":
+            st.info("Estado global: Preliminarmente aceptable")
+        elif module13_results["global_status"] == "Revisión requerida":
+            st.warning("Estado global: Revisión requerida")
+        elif module13_results["global_status"] == "No cumple":
+            st.error("Estado global: No cumple")
+        else:
+            st.info(f"Estado global: {module13_results['global_status']}")
+
+        st.markdown("### Chequeos críticos")
+        if module13_results["critical_checks"]:
+            critical_df = pd.DataFrame(module13_results["critical_checks"])
+            st.dataframe(critical_df, use_container_width=True, hide_index=True)
+        else:
+            st.success("No se identificaron chequeos críticos.")    
+    
     with tab15:
+        st.subheader("Resumen")
+        st.write("Esta pestaña puede reservarse para exportación futura o reporte compacto.")
+
+    with tab16:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
         st.write("- Rama uniaxial: Módulos 1 a 10")
-        st.write("- Rama biaxial preliminar: Módulo 11")
-        st.write("- Rama biaxial refinada por malla: Módulo 12")
-        st.write("**Siguiente módulo recomendado:**")
-        st.write("- Módulo 13: cierre de diseño y reporte global")
+        st.write("- Rama biaxial: Módulos 11 y 12")
+        st.write("- Cierre global: Módulo 13")
+        st.write("**Siguiente mejora recomendada:**")
+        st.write("- Exportación de reporte")
+        st.write("- Ajuste fino del biaxial no lineal")
+        st.write("- Gráficos de distribución de presión y tracción")
 
 except Exception as exc:
     st.error(f"Error en los datos de entrada: {exc}")
