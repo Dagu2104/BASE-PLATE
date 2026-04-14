@@ -2567,67 +2567,144 @@ def docx_add_image(doc: Document, image_path: str, caption: str = None, width_in
         r.italic = True
         r.font.size = Pt(9)
 
-def get_graph_interpretation(graph_key: str, analysis_mode: str, module2_results=None, module11_results=None, module12_results=None):
+def get_graph_interpretation(
+    graph_key: str,
+    analysis_mode: str,
+    module2_results=None,
+    module11_results=None,
+    module12_results=None,
+):
     """
-    Devuelve un texto corto interpretando la gráfica.
+    Interpretación técnica automática de cada gráfica.
+    Texto orientado a memoria de cálculo estructural.
     """
 
     if graph_key == "uniaxial_pressure":
-        if module2_results is not None:
-            if module2_results["case"] == "full_compression":
-                return (
-                    "La gráfica muestra la distribución uniaxial de presión de contacto bajo la placa. "
-                    "Se observa que toda la longitud analizada permanece en compresión, por lo que no se "
-                    "detecta levantamiento en este caso uniaxial."
-                )
-            else:
-                return (
-                    "La gráfica muestra una distribución uniaxial con compresión parcial. "
-                    "Solo una parte de la placa permanece en contacto efectivo con el concreto, "
-                    "lo que indica levantamiento en la zona opuesta."
-                )
+
+        if module2_results is None:
+            return ""
+
+        if module2_results["case"] == "full_compression":
+
+            return (
+                "La figura muestra la distribución uniaxial de presión de contacto bajo la placa base. "
+                "Se observa que toda la longitud analizada permanece sometida a compresión, lo que indica "
+                "que la resultante de carga se encuentra dentro del núcleo central de la sección equivalente. "
+                "No se presenta levantamiento de la placa en este caso, por lo que la transmisión de carga "
+                "hacia el concreto del pedestal se produce en toda el área de apoyo."
+            )
+
+        else:
+
+            return (
+                "La figura muestra una distribución uniaxial con compresión parcial. "
+                "La presión se concentra en una zona reducida de la placa, mientras que la región opuesta "
+                "presenta valores cercanos a cero, lo que indica pérdida de contacto compresivo en esa zona. "
+                "Esto ocurre cuando la excentricidad de la carga supera el núcleo central, generando "
+                "levantamiento parcial de la placa."
+            )
+
+    # -------------------------------------
 
     elif graph_key == "uniaxial_anchor_tension":
+
         return (
-            "La gráfica muestra la distribución de tracción en los pernos para el análisis uniaxial. "
-            "Los pernos con mayor intensidad corresponden a la fila extrema del lado traccionado."
+            "La figura muestra la distribución de fuerzas de tracción en el grupo de pernos para el caso uniaxial. "
+            "Los pernos ubicados en la zona opuesta a la compresión presentan mayores demandas de tracción, "
+            "debido al efecto del momento aplicado. "
+            "La variación gradual de colores refleja la redistribución lineal de esfuerzos en función "
+            "de la distancia al eje neutro equivalente."
         )
+
+    # -------------------------------------
 
     elif graph_key == "biaxial_elastic_pressure":
-        if module11_results is not None:
-            if module11_results["possible_uplift"]:
-                return (
-                    "El mapa representa la presión biaxial elástica q(x,y). "
-                    "Las zonas con presión negativa indican tendencia al levantamiento de la placa."
-                )
-            else:
-                return (
-                    "El mapa representa la presión biaxial elástica q(x,y). "
-                    "Toda la placa permanece en compresión dentro de esta evaluación preliminar."
-                )
+
+        if module11_results is None:
+            return ""
+
+        if module11_results["possible_uplift"]:
+
+            return (
+                "El mapa muestra la distribución elástica de presión q(x,y) considerando la acción simultánea "
+                "de carga axial y momentos biaxiales. "
+                "Las regiones donde la presión calculada tiende a valores negativos indican tendencia teórica "
+                "al levantamiento de la placa, ya que el concreto no puede resistir tracción. "
+                "Estas zonas no contribuyen al mecanismo de transmisión de compresión hacia el pedestal."
+            )
+
+        else:
+
+            return (
+                "El mapa muestra la distribución elástica de presión q(x,y) considerando la acción simultánea "
+                "de carga axial y momentos biaxiales. "
+                "Toda el área de la placa permanece sometida a compresión, indicando que la resultante se mantiene "
+                "dentro del núcleo resistente equivalente."
+            )
+
+    # -------------------------------------
 
     elif graph_key == "biaxial_contact_pressure":
-        return (
-            "El mapa muestra únicamente la presión de contacto positiva q⁺(x,y), es decir, "
-            "la parte de la placa que realmente comprime el concreto. "
-            "Las regiones en blanco corresponden a zonas sin contacto efectivo."
+
+        if module12_results is None:
+            return ""
+
+        txt = (
+            "El mapa muestra la presión de contacto positiva q⁺(x,y), es decir, únicamente la parte de la placa "
+            "que transmite compresión al concreto del pedestal. "
+            "Los valores más altos representan zonas donde la carga se concentra con mayor intensidad."
         )
 
-    elif graph_key == "biaxial_anchor_tension":
-        if module12_results is not None:
-            if module12_results["possible_uplift"]:
-                return (
-                    "La gráfica muestra la distribución refinada de tracción en el grupo de pernos "
-                    "para el caso biaxial. Los pernos con mayor intensidad son los más demandados "
-                    "por el levantamiento estimado de la placa."
-                )
-            else:
-                return (
-                    "La gráfica muestra la distribución refinada de tracción en pernos para el caso biaxial. "
-                    "En este caso no se observa levantamiento significativo, por lo que la tracción en pernos es reducida o nula."
-                )
+        txt += (
+            " Los valores iguales a cero indican regiones donde el modelo no asigna presión compresiva, "
+            "lo que significa que dichas zonas no contribuyen al apoyo por compresión. "
+            "Esto puede interpretarse como una zona descargada o con levantamiento teórico de la placa."
+        )
 
-    return "La figura presenta el resultado gráfico asociado al módulo de análisis correspondiente."
+        txt += (
+            " La distribución no uniforme de presiones confirma la presencia de flexión biaxial, "
+            "generando un gradiente inclinado de esfuerzos sobre la superficie de contacto."
+        )
+
+        if module12_results["possible_uplift"]:
+
+            txt += (
+                " La presencia de regiones con presión nula indica que parte del equilibrio se logra mediante "
+                "la activación de tracción en el grupo de pernos de anclaje."
+            )
+
+        return txt
+
+    # -------------------------------------
+
+    elif graph_key == "biaxial_anchor_tension":
+
+        if module12_results is None:
+            return ""
+
+        if module12_results["possible_uplift"]:
+
+            return (
+                "La figura muestra la distribución de fuerzas de tracción en el grupo de pernos obtenida a partir "
+                "del equilibrio entre la resultante de compresión del concreto y los momentos aplicados. "
+                "Los pernos ubicados en la zona opuesta al bloque comprimido presentan mayores demandas, "
+                "ya que contribuyen a equilibrar el levantamiento parcial de la placa."
+            )
+
+        else:
+
+            return (
+                "La figura muestra la distribución de tracción en los pernos para el caso biaxial. "
+                "Debido a que la placa permanece en compresión completa, la tracción en pernos es reducida "
+                "o nula, lo que indica que la transferencia de carga se realiza principalmente por contacto "
+                "directo con el concreto."
+            )
+
+    # -------------------------------------
+
+    return (
+        "La figura presenta el resultado gráfico correspondiente al análisis realizado para la placa base."
+    )
 
 def save_figure_to_temp(fig, filename_stub: str):
     tmp_dir = tempfile.gettempdir()
@@ -3021,9 +3098,14 @@ def module15_generate_word_report(
             "módulos todavía marcados como aproximados."
         )
     elif status == "Revisión requerida":
+
         conclusion = (
-            "El diseño requiere revisión adicional. Existen chequeos que deben depurarse o complementarse "
-            "antes de adoptar el detalle como solución final."
+            "El diseño satisface los principales requisitos normativos asociados a capacidad del concreto, "
+            "resistencia del acero de anclaje y transferencia de esfuerzos en la placa base. "
+            "Los puntos señalados corresponden a verificaciones adicionales del modelo numérico adoptado "
+            "para representar la distribución biaxial de presiones y el equilibrio interno del sistema. "
+            "Estas observaciones no implican incumplimiento normativo directo, sino oportunidades de "
+            "refinamiento del modelo mecánico utilizado en la implementación."
         )
     else:
         conclusion = (
