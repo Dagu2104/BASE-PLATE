@@ -1117,6 +1117,217 @@ def module7_concrete_shear(
         "thickness_warning": thickness_warning,
         "group_span_perp_mm": group_span_perp_mm,
     }
+
+# ============================================================
+# MÓDULO 8 - ACI 17.9 GEOMETRÍA MÍNIMA
+# ============================================================
+
+def module8_geometry_minimums_aci_17_9(
+    anchors: AnchorLayout,
+    pedestal: PedestalGeometry,
+    bolt_df: pd.DataFrame,
+    anchor_installation: str,
+    post_installed_type_for_17_9: str,
+    anchor_torqued: bool,
+    supplementary_reinforcement_for_splitting: bool,
+    nominal_max_agg_mm: float,
+    required_cover_mm: float,
+    product_specific_geometry_data: bool,
+    product_specific_min_edge_mm: float,
+    product_specific_min_spacing_mm: float,
+    tests_permit_greater_hef: bool,
+) -> dict:
+    """
+    Módulo 8:
+    chequeo geométrico mínimo conforme a ACI 318-25 17.9.
+
+    Revisa:
+    - espaciamiento mínimo
+    - distancia mínima al borde
+    - límite de hef para post-installed expansion / screw / undercut
+
+    Notas:
+    - Si hay refuerzo suplementario para controlar splitting, 17.9 permite salir de
+      estos mínimos generales.
+    - Para post-installed, la fuente primaria debe ser información product-specific
+      ACI 355.2 / 355.4.
+    """
+
+    db = anchors.db_mm
+    hef = anchors.hef_mm
+
+    # --------------------------------------------------------
+    # Espaciamiento real mínimo entre pernos
+    # --------------------------------------------------------
+    coords = bolt_df[["x_mm", "y_mm"]].to_numpy()
+    min_spacing_real_mm = float("inf")
+
+    for i in range(len(coords)):
+        for j in range(i + 1, len(coords)):
+            dij = math.dist(coords[i], coords[j])
+            min_spacing_real_mm = min(min_spacing_real_mm, dij)
+
+    if min_spacing_real_mm == float("inf"):
+        min_spacing_real_mm = 0.0
+
+    # --------------------------------------------------------
+    # Distancia real mínima al borde del pedestal
+    # --------------------------------------------------------
+    x_left_edge = -pedestal.B_ped_mm / 2.0
+    x_right_edge = pedestal.B_ped_mm / 2.0
+    y_bottom_edge = -pedestal.N_ped_mm / 2.0
+    y_top_edge = pedestal.N_ped_mm / 2.0
+
+    edge_distances = []
+
+    for _, row in bolt_df.iterrows():
+        x = row["x_mm"]
+        y = row["y_mm"]
+
+        edge_distances.extend([
+            abs(x - x_left_edge),
+            abs(x_right_edge - x),
+            abs(y - y_bottom_edge),
+            abs(y_top_edge - y),
+        ])
+
+    min_edge_real_mm = min(edge_distances) if edge_distances else 0.0
+
+    # --------------------------------------------------------
+    # Si existe refuerzo suplementario, el módulo lo reporta,
+    # pero igual calcula los mínimos de referencia
+    # --------------------------------------------------------
+    # Espaciamiento mínimo requerido
+    if anchor_installation == "cast_in":
+        if anchor_torqued:
+            s_min_req_mm = 6.0 * db
+            c_min_req_mm = 6.0 * db
+            geometry_rule_label = "Cast-in torqued"
+        else:
+            s_min_req_mm = 4.0 * db
+            c_min_req_mm = required_cover_mm
+            geometry_rule_label = "Cast-in not torqued"
+
+    elif anchor_installation == "post_installed":
+        geometry_rule_label = f"Post-installed: {post_installed_type_for_17_9}"
+
+        if post_installed_type_for_17_9 in ["adhesive", "torque_controlled", "displacement_controlled", "undercut"]:
+            s_min_req_mm = 6.0 * db
+        elif post_installed_type_for_17_9 == "screw":
+            s_min_req_mm = max(0.6 * hef, 6.0 * db)
+        else:
+            raise ValueError("Tipo de post-installed no reconocido para 17.9.")
+
+        # Distancia al borde
+        if product_specific_geometry_data and product_specific_min_edge_mm > 0:
+            product_edge_req = product_specific_min_edge_mm
+        else:
+            if post_installed_type_for_17_9 == "torque_controlled":
+                product_edge_req = 8.0 * db
+            elif post_installed_type_for_17_9 == "displacement_controlled":
+                product_edge_req = 10.0 * db
+            elif post_installed_type_for_17_9 in ["screw", "undercut", "adhesive"]:
+                product_edge_req = 6.0 * db
+            else:
+                raise ValueError("Tipo de post-installed no reconocido para borde 17.9.")
+
+        c_min_req_mm = max(
+            required_cover_mm,
+            2.0 * nominal_max_agg_mm,
+            product_edge_req
+        )
+
+        if product_specific_geometry_data and product_specific_min_spacing_mm > 0:
+            s_min_req_mm = max(s_min_req_mm, product_specific_min_spacing_mm)
+
+    else:
+        raise ValueError("anchor_installation debe ser 'cast_in' o 'post_installed'.")
+
+    # --------------------------------------------------------
+    # Chequeos
+    # --------------------------------------------------------
+    spacing_ok = min_spacing_real_mm >= s_min_req_mm
+    edge_ok = min_edge_real_mm >= c_min_req_mm
+
+    # --------------------------------------------------------
+    # 17.9.4 - límite de hef para ciertos post-installed
+    # --------------------------------------------------------
+    hef_limit_req_mm = None
+    hef_limit_ok = None
+
+    if anchor_installation == "post_installed" and post_installed_type_for_17_9 in [
+        "torque_controlled", "displacement_controlled", "screw", "undercut"
+    ]:
+        hef_limit_req_mm = max((2.0 / 3.0) * pedestal.h_ped_mm, pedestal.h_ped_mm - 100.0)
+
+        if tests_permit_greater_hef:
+            hef_limit_ok = True
+        else:
+            hef_limit_ok = hef <= hef_limit_req_mm
+
+    # --------------------------------------------------------
+    # Caso 17.9.3
+    # --------------------------------------------------------
+    can_use_da_prime = (
+        anchor_installation == "cast_in" and
+        not anchor_torqued
+    ) or (
+        anchor_installation == "post_installed" and
+        not anchor_torqued
+    )
+
+    da_prime_mm = None
+
+    if can_use_da_prime:
+        # diámetro equivalente por espaciamiento
+        da_prime_spacing = min_spacing_real_mm / 4.0 if anchor_installation == "cast_in" else min_spacing_real_mm / 6.0
+
+        # diámetro equivalente por borde
+        if anchor_installation == "cast_in":
+            da_prime_edge = float("inf")  # borde controlado por cover, no por múltiplo de da
+        else:
+            if post_installed_type_for_17_9 == "torque_controlled":
+                da_prime_edge = min_edge_real_mm / 8.0
+            elif post_installed_type_for_17_9 == "displacement_controlled":
+                da_prime_edge = min_edge_real_mm / 10.0
+            elif post_installed_type_for_17_9 in ["screw", "undercut", "adhesive"]:
+                da_prime_edge = min_edge_real_mm / 6.0
+            else:
+                da_prime_edge = float("inf")
+
+        da_prime_mm = min(db, da_prime_spacing, da_prime_edge)
+
+    # --------------------------------------------------------
+    # Resultado global
+    # --------------------------------------------------------
+    geometric_ok = spacing_ok and edge_ok
+
+    if hef_limit_ok is not None:
+        geometric_ok = geometric_ok and hef_limit_ok
+
+    return {
+        "geometry_rule_label": geometry_rule_label,
+        "supplementary_reinforcement_for_splitting": supplementary_reinforcement_for_splitting,
+        "db_mm": db,
+        "hef_mm": hef,
+        "min_spacing_real_mm": min_spacing_real_mm,
+        "min_edge_real_mm": min_edge_real_mm,
+        "s_min_req_mm": s_min_req_mm,
+        "c_min_req_mm": c_min_req_mm,
+        "spacing_ok": spacing_ok,
+        "edge_ok": edge_ok,
+        "hef_limit_req_mm": hef_limit_req_mm,
+        "hef_limit_ok": hef_limit_ok,
+        "can_use_da_prime": can_use_da_prime,
+        "da_prime_mm": da_prime_mm,
+        "geometric_ok": geometric_ok,
+        "required_cover_mm": required_cover_mm,
+        "nominal_max_agg_mm": nominal_max_agg_mm,
+        "product_specific_geometry_data": product_specific_geometry_data,
+        "product_specific_min_edge_mm": product_specific_min_edge_mm,
+        "product_specific_min_spacing_mm": product_specific_min_spacing_mm,
+        "tests_permit_greater_hef": tests_permit_greater_hef,
+    }
 # ============================================================
 # FUNCIONES DE GRÁFICO
 # ============================================================
@@ -1342,7 +1553,60 @@ with st.sidebar.expander("Módulo 7 - concreto en cortante", expanded=False):
         value=0.70,
         step=0.01
     )
+with st.sidebar.expander("Módulo 8 - ACI 17.9 geometría mínima", expanded=False):
+    supplementary_reinforcement_for_splitting = st.checkbox(
+        "¿Existe refuerzo suplementario para controlar splitting?",
+        value=False
+    )
 
+    anchor_torqued = st.checkbox(
+        "¿El anclaje será torqued?",
+        value=True
+    )
+
+    nominal_max_agg_mm = st.number_input(
+        "Tamaño máximo nominal del agregado [mm]",
+        min_value=1.0,
+        value=19.0,
+        step=1.0
+    )
+
+    required_cover_mm = st.number_input(
+        "Recubrimiento mínimo requerido según 20.5.1.3 [mm]",
+        min_value=0.0,
+        value=75.0,
+        step=5.0
+    )
+
+    product_specific_geometry_data = st.checkbox(
+        "¿Existe información product-specific ACI 355.2 / 355.4?",
+        value=False
+    )
+
+    product_specific_min_edge_mm = st.number_input(
+        "Distancia mínima al borde product-specific [mm]",
+        min_value=0.0,
+        value=0.0,
+        step=5.0
+    )
+
+    product_specific_min_spacing_mm = st.number_input(
+        "Espaciamiento mínimo product-specific [mm]",
+        min_value=0.0,
+        value=0.0,
+        step=5.0
+    )
+
+    post_installed_type_for_17_9 = st.selectbox(
+        "Tipo de post-installed para 17.9",
+        ["adhesive", "torque_controlled", "displacement_controlled", "screw", "undercut"],
+        index=0
+    )
+
+    tests_permit_greater_hef = st.checkbox(
+        "¿Existen ensayos que permiten exceder el límite de hef de 17.9.4?",
+        value=False
+    )
     ca1_shear_mm = st.number_input(
         "ca1, shear [mm] (borde en dirección del cortante)",
         min_value=0.001,
@@ -1650,10 +1914,32 @@ try:
         )
     else:
         module7_results = None
+
+    # --------------------------------------------------------
+    # MÓDULO 8
+    # --------------------------------------------------------
+    if analysis_mode == "Uniaxial":
+        module8_results = module8_geometry_minimums_aci_17_9(
+            anchors=anchors,
+            pedestal=pedestal,
+            bolt_df=bolt_df,
+            anchor_installation=anchor_installation,
+            post_installed_type_for_17_9=post_installed_type_for_17_9,
+            anchor_torqued=anchor_torqued,
+            supplementary_reinforcement_for_splitting=supplementary_reinforcement_for_splitting,
+            nominal_max_agg_mm=nominal_max_agg_mm,
+            required_cover_mm=required_cover_mm,
+            product_specific_geometry_data=product_specific_geometry_data,
+            product_specific_min_edge_mm=product_specific_min_edge_mm,
+            product_specific_min_spacing_mm=product_specific_min_spacing_mm,
+            tests_permit_greater_hef=tests_permit_greater_hef,
+        )
+    else:
+        module8_results = None        
     # --------------------------------------------------------
     # PESTAÑAS
     # --------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
     "Datos y geometría",
     "Módulo 1 - Uniaxial",
     "Módulo 2 - Compresión",
@@ -1662,6 +1948,7 @@ try:
     "Módulo 5 - Acero anclaje",
     "Módulo 6 - Concreto tensión",
     "Módulo 7 - Concreto cortante",
+    "Módulo 8 - ACI 17.9",
     "Biaxial",
     "Resumen",
     ])
@@ -2065,12 +2352,63 @@ try:
                 st.error("El concreto no cumple preliminarmente en cortante o en interacción N-V.")
 
     with tab9:
+        st.subheader("Módulo 8 - ACI 318-25 Sección 17.9")
+
+        if analysis_mode != "Uniaxial":
+            st.info("En la barra lateral elegiste modo Biaxial. Cambia a Uniaxial para activar este módulo.")
+        else:
+            mod8_rows = [
+                ["Regla geométrica aplicada", module8_results["geometry_rule_label"]],
+                ["Refuerzo suplementario para splitting", "Sí" if module8_results["supplementary_reinforcement_for_splitting"] else "No"],
+                ["db [mm]", f"{module8_results['db_mm']:.3f}"],
+                ["hef [mm]", f"{module8_results['hef_mm']:.3f}"],
+                ["Espaciamiento real mínimo [mm]", f"{module8_results['min_spacing_real_mm']:.3f}"],
+                ["Espaciamiento mínimo requerido [mm]", f"{module8_results['s_min_req_mm']:.3f}"],
+                ["Chequeo de espaciamiento", "Cumple" if module8_results["spacing_ok"] else "No cumple"],
+                ["Distancia real mínima al borde [mm]", f"{module8_results['min_edge_real_mm']:.3f}"],
+                ["Distancia mínima requerida al borde [mm]", f"{module8_results['c_min_req_mm']:.3f}"],
+                ["Chequeo de borde", "Cumple" if module8_results["edge_ok"] else "No cumple"],
+                ["Recubrimiento requerido [mm]", f"{module8_results['required_cover_mm']:.3f}"],
+                ["Tamaño máximo agregado [mm]", f"{module8_results['nominal_max_agg_mm']:.3f}"],
+                ["Datos product-specific", "Sí" if module8_results["product_specific_geometry_data"] else "No"],
+                ["hef límite 17.9.4 [mm]", "-" if module8_results["hef_limit_req_mm"] is None else f"{module8_results['hef_limit_req_mm']:.3f}"],
+                ["Chequeo hef 17.9.4", "-" if module8_results["hef_limit_ok"] is None else ("Cumple" if module8_results["hef_limit_ok"] else "No cumple")],
+                ["¿Se puede evaluar da' por 17.9.3?", "Sí" if module8_results["can_use_da_prime"] else "No"],
+                ["da' estimado [mm]", "-" if module8_results["da_prime_mm"] is None else f"{module8_results['da_prime_mm']:.3f}"],
+                ["Chequeo global geométrico", "Cumple" if module8_results["geometric_ok"] else "No cumple"],
+            ]
+
+            mod8_df = pd.DataFrame(mod8_rows, columns=["Parámetro", "Valor"])
+            st.dataframe(mod8_df, use_container_width=True, hide_index=True)
+
+            if module8_results["supplementary_reinforcement_for_splitting"]:
+                st.info(
+                    "ACI 17.9 permite salir de estos mínimos si existe refuerzo suplementario para controlar splitting. "
+                    "Este módulo igual te muestra los mínimos de referencia."
+                )
+
+            if not module8_results["geometric_ok"]:
+                st.warning(
+                    "La geometría no cumple completamente con los mínimos de ACI 17.9. "
+                    "Si el anclaje no produce splitting al instalarse y no será torqued, 17.9.3 permite usar un diámetro equivalente da'."
+                )
+
+            if module8_results["can_use_da_prime"] and module8_results["da_prime_mm"] is not None and module8_results["da_prime_mm"] < module8_results["db_mm"]:
+                st.warning(
+                    f"Para 17.9.3, el diámetro equivalente preliminar da' sería {module8_results['da_prime_mm']:.2f} mm, "
+                    "y las fuerzas aplicadas deberían limitarse a las correspondientes a ese diámetro equivalente."
+                )
+
+            if module8_results["geometric_ok"]:
+                st.success("El arreglo cumple los mínimos geométricos revisados de ACI 17.9 en esta etapa.")
+
+    with tab10:
         st.subheader("Modo biaxial")
         st.info(
             "Aquí irá el módulo biaxial una vez que cerremos y depuremos bien el flujo uniaxial."
         )
 
-    with tab10:
+    with tab11:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
         st.write("- Base geométrica")
@@ -2079,10 +2417,11 @@ try:
         st.write("- Módulo 3 tracción preliminar en pernos")
         st.write("- Módulo 4 espesor de placa")
         st.write("- Módulo 5 acero del anclaje")
-        st.write("- Módulo 6 concreto en tensión (ACI 17 parcial)")
-        st.write("- Módulo 7 concreto en cortante (ACI 17 parcial)")
+        st.write("- Módulo 6 concreto en tensión")
+        st.write("- Módulo 7 concreto en cortante")
+        st.write("- Módulo 8 requisitos geométricos ACI 17.9")
         st.write("**Siguiente módulo a integrar:**")
-        st.write("- Módulo 8: mínimos geométricos ACI 17.9 y chequeos de borde/espaciamiento/espesor")
+        st.write("- Módulo 9: soldadura y mecanismo de transferencia de cortante en la base")
 
 except Exception as exc:
     st.error(f"Error en los datos de entrada: {exc}")
