@@ -1518,6 +1518,126 @@ def module9_base_shear_transfer(
         "shear_ok": shear_ok,
         "utilization": utilization,
     }
+
+# ============================================================
+# MÓDULO 10 - SOLDADURA
+# ============================================================
+
+def module10_weld_design(
+    column_plot: dict,
+    loads: Loads,
+    module3_results: dict,
+    module9_results: dict,
+    FEXX_MPa: float,
+    phi_weld: float,
+    use_auto_column_weld_length: bool,
+    column_weld_size_mm: float,
+    column_weld_length_manual_mm: float,
+    provide_shear_lug_weld: bool,
+    shear_lug_weld_size_mm: float,
+    shear_lug_weld_length_mm: float,
+) -> dict:
+    """
+    Módulo 10:
+    diseño preliminar de soldaduras de filete.
+
+    Incluye:
+    - columna a placa base
+    - shear lug a placa base
+
+    Modelo:
+    phiRn = phi * 0.60 * FEXX * (0.707 * w * L_eff)
+
+    Notas:
+    - modelo concéntrico preliminar
+    - no incluye grupo excéntrico de soldadura
+    - no incluye groove welds
+    - no incluye requisitos sísmicos especiales AISC 341 / AWS D1.8
+    """
+
+    section_type = column_plot.get("section_type", "W").upper()
+    d_mm = column_plot["d_mm"]
+    bf_mm = column_plot["bf_mm"]
+    tf_mm = column_plot.get("tf_mm", 0.0)
+
+    # --------------------------------------------------------
+    # Demanda para soldadura columna-placa
+    # Se toma la tracción total del módulo 3
+    # --------------------------------------------------------
+    if module3_results["tension_active"]:
+        Tu_col_base_kN = module3_results["T_total_kN"]
+    else:
+        Tu_col_base_kN = 0.0
+
+    # --------------------------------------------------------
+    # Longitud de soldadura columna-placa
+    # --------------------------------------------------------
+    if use_auto_column_weld_length:
+        if section_type in ["W", "H", "I"]:
+            # aproximación del perímetro soldado:
+            # 2 alas completas + 2 lados del alma entre alas
+            web_clear_mm = max(d_mm - 2.0 * tf_mm, 0.0)
+            L_col_weld_eff_mm = 2.0 * bf_mm + 2.0 * web_clear_mm
+        else:
+            # HSS / BOX / fallback rectangular
+            L_col_weld_eff_mm = 2.0 * (bf_mm + d_mm)
+    else:
+        L_col_weld_eff_mm = column_weld_length_manual_mm
+
+    # --------------------------------------------------------
+    # Resistencia soldadura columna-placa
+    # --------------------------------------------------------
+    Aw_col_mm2 = 0.707 * column_weld_size_mm * L_col_weld_eff_mm
+    phiRn_col_kN = phi_weld * 0.60 * FEXX_MPa * Aw_col_mm2 / 1_000.0
+
+    col_weld_ok = Tu_col_base_kN <= phiRn_col_kN if phiRn_col_kN > 0 else (Tu_col_base_kN == 0.0)
+    col_weld_util = Tu_col_base_kN / phiRn_col_kN if phiRn_col_kN > 0 else float("inf")
+
+    # --------------------------------------------------------
+    # Demanda para soldadura shear lug-placa
+    # --------------------------------------------------------
+    if module9_results["shear_key_required"]:
+        Vu_lug_kN = module9_results["Vu_remaining_for_key_kN"]
+    else:
+        Vu_lug_kN = 0.0
+
+    # --------------------------------------------------------
+    # Resistencia soldadura shear lug-placa
+    # --------------------------------------------------------
+    if provide_shear_lug_weld:
+        Aw_lug_mm2 = 0.707 * shear_lug_weld_size_mm * shear_lug_weld_length_mm
+        phiRn_lug_kN = phi_weld * 0.60 * FEXX_MPa * Aw_lug_mm2 / 1_000.0
+        lug_weld_ok = Vu_lug_kN <= phiRn_lug_kN if phiRn_lug_kN > 0 else (Vu_lug_kN == 0.0)
+        lug_weld_util = Vu_lug_kN / phiRn_lug_kN if phiRn_lug_kN > 0 else float("inf")
+    else:
+        Aw_lug_mm2 = 0.0
+        phiRn_lug_kN = 0.0
+        lug_weld_ok = not module9_results["shear_key_required"]
+        lug_weld_util = 0.0 if not module9_results["shear_key_required"] else float("inf")
+
+    return {
+        "FEXX_MPa": FEXX_MPa,
+        "phi_weld": phi_weld,
+
+        "Tu_col_base_kN": Tu_col_base_kN,
+        "column_weld_size_mm": column_weld_size_mm,
+        "L_col_weld_eff_mm": L_col_weld_eff_mm,
+        "Aw_col_mm2": Aw_col_mm2,
+        "phiRn_col_kN": phiRn_col_kN,
+        "col_weld_ok": col_weld_ok,
+        "col_weld_util": col_weld_util,
+        "use_auto_column_weld_length": use_auto_column_weld_length,
+
+        "shear_key_required": module9_results["shear_key_required"],
+        "Vu_lug_kN": Vu_lug_kN,
+        "provide_shear_lug_weld": provide_shear_lug_weld,
+        "shear_lug_weld_size_mm": shear_lug_weld_size_mm,
+        "shear_lug_weld_length_mm": shear_lug_weld_length_mm,
+        "Aw_lug_mm2": Aw_lug_mm2,
+        "phiRn_lug_kN": phiRn_lug_kN,
+        "lug_weld_ok": lug_weld_ok,
+        "lug_weld_util": lug_weld_util,
+    }
 # ============================================================
 # FUNCIONES DE GRÁFICO
 # ============================================================
@@ -1918,6 +2038,65 @@ with st.sidebar.expander("Módulo 9 - cortante en la base", expanded=False):
         value=False
     )
 
+with st.sidebar.expander("Módulo 10 - soldadura", expanded=False):
+    FEXX_MPa = st.number_input(
+        "FEXX del electrodo [MPa]",
+        min_value=1.0,
+        value=490.0,
+        step=10.0
+    )
+
+    phi_weld = st.number_input(
+        "φ soldadura",
+        min_value=0.01,
+        max_value=1.00,
+        value=0.75,
+        step=0.01
+    )
+
+    # ----------------------------------------------------
+    # Soldadura columna - placa
+    # ----------------------------------------------------
+    use_auto_column_weld_length = st.checkbox(
+        "Autoestimar longitud de soldadura columna-placa",
+        value=True
+    )
+
+    column_weld_size_mm = st.number_input(
+        "Tamaño filete columna-placa [mm]",
+        min_value=0.0,
+        value=8.0,
+        step=1.0
+    )
+
+    column_weld_length_manual_mm = st.number_input(
+        "Longitud efectiva manual columna-placa [mm]",
+        min_value=0.0,
+        value=0.0,
+        step=10.0
+    )
+
+    # ----------------------------------------------------
+    # Soldadura shear lug - placa
+    # ----------------------------------------------------
+    provide_shear_lug_weld = st.checkbox(
+        "¿Evaluar soldadura shear lug-placa?",
+        value=False
+    )
+
+    shear_lug_weld_size_mm = st.number_input(
+        "Tamaño filete shear lug-placa [mm]",
+        min_value=0.0,
+        value=8.0,
+        step=1.0
+    )
+
+    shear_lug_weld_length_mm = st.number_input(
+        "Longitud efectiva total shear lug-placa [mm]",
+        min_value=0.0,
+        value=200.0,
+        step=10.0
+    )
 with st.sidebar.expander("Pedestal", expanded=True):
     B_ped_mm = st.number_input("B pedestal [mm]", min_value=0.001, value=900.0)
     N_ped_mm = st.number_input("N pedestal [mm]", min_value=0.001, value=900.0)
@@ -2186,10 +2365,31 @@ try:
         )
     else:
         module9_results = None    
+
+    # --------------------------------------------------------
+    # MÓDULO 10
+    # --------------------------------------------------------
+    if analysis_mode == "Uniaxial":
+        module10_results = module10_weld_design(
+            column_plot=column_plot,
+            loads=loads,
+            module3_results=module3_results,
+            module9_results=module9_results,
+            FEXX_MPa=FEXX_MPa,
+            phi_weld=phi_weld,
+            use_auto_column_weld_length=use_auto_column_weld_length,
+            column_weld_size_mm=column_weld_size_mm,
+            column_weld_length_manual_mm=column_weld_length_manual_mm,
+            provide_shear_lug_weld=provide_shear_lug_weld,
+            shear_lug_weld_size_mm=shear_lug_weld_size_mm,
+            shear_lug_weld_length_mm=shear_lug_weld_length_mm,
+        )
+    else:
+        module10_results = None
     # --------------------------------------------------------
     # PESTAÑAS
     # --------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
     "Datos y geometría",
     "Módulo 1 - Uniaxial",
     "Módulo 2 - Compresión",
@@ -2200,6 +2400,7 @@ try:
     "Módulo 7 - Concreto cortante",
     "Módulo 8 - ACI 17.9",
     "Módulo 9 - Cortante base",
+    "Módulo 10 - Soldadura",
     "Biaxial",
     "Resumen",
     ])
@@ -2696,14 +2897,84 @@ try:
                 )
             else:
                 st.success("No se requiere shear key en esta evaluación.")
-
     with tab11:
+        st.subheader("Módulo 10 - soldadura")
+
+        if analysis_mode != "Uniaxial":
+            st.info("En la barra lateral elegiste modo Biaxial. Cambia a Uniaxial para activar este módulo.")
+        else:
+            st.markdown("### Soldadura columna - placa base")
+
+            mod10_col_rows = [
+                ["FEXX [MPa]", f"{module10_results['FEXX_MPa']:.3f}"],
+                ["φ soldadura", f"{module10_results['phi_weld']:.3f}"],
+                ["Demanda Tu columna-base [kN]", f"{module10_results['Tu_col_base_kN']:.5f}"],
+                ["Tamaño filete [mm]", f"{module10_results['column_weld_size_mm']:.3f}"],
+                ["Longitud efectiva L [mm]", f"{module10_results['L_col_weld_eff_mm']:.3f}"],
+                ["Área efectiva Aw [mm²]", f"{module10_results['Aw_col_mm2']:.3f}"],
+                ["φRn soldadura columna-base [kN]", f"{module10_results['phiRn_col_kN']:.5f}"],
+                ["Utilización Tu/φRn", f"{module10_results['col_weld_util']:.5f}"],
+                ["Chequeo columna-base", "Cumple" if module10_results["col_weld_ok"] else "No cumple"],
+            ]
+
+            st.dataframe(
+                pd.DataFrame(mod10_col_rows, columns=["Parámetro", "Valor"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            if module10_results["col_weld_ok"]:
+                st.success("La soldadura columna-placa cumple en este modelo preliminar de filete concéntrico.")
+            else:
+                st.error("La soldadura columna-placa no cumple en este modelo preliminar.")
+
+            st.markdown("### Soldadura shear lug - placa base")
+
+            mod10_lug_rows = [
+                ["¿Se requiere shear key?", "Sí" if module10_results["shear_key_required"] else "No"],
+                ["¿Se evaluó soldadura del lug?", "Sí" if module10_results["provide_shear_lug_weld"] else "No"],
+                ["Demanda Vu lug [kN]", f"{module10_results['Vu_lug_kN']:.5f}"],
+                ["Tamaño filete lug [mm]", f"{module10_results['shear_lug_weld_size_mm']:.3f}"],
+                ["Longitud efectiva lug [mm]", f"{module10_results['shear_lug_weld_length_mm']:.3f}"],
+                ["Área efectiva Aw lug [mm²]", f"{module10_results['Aw_lug_mm2']:.3f}"],
+                ["φRn soldadura lug [kN]", f"{module10_results['phiRn_lug_kN']:.5f}"],
+                ["Utilización Vu/φRn lug", f"{module10_results['lug_weld_util']:.5f}"],
+                ["Chequeo lug-placa", "Cumple" if module10_results["lug_weld_ok"] else "No cumple"],
+            ]
+
+            st.dataframe(
+                pd.DataFrame(mod10_lug_rows, columns=["Parámetro", "Valor"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            if module10_results["shear_key_required"] and not module10_results["provide_shear_lug_weld"]:
+                st.warning(
+                    "El Módulo 9 detectó que se requiere shear key, pero no activaste la revisión de soldadura shear lug-placa."
+                )
+
+            if module10_results["provide_shear_lug_weld"]:
+                if module10_results["lug_weld_ok"]:
+                    st.success("La soldadura shear lug-placa cumple en este modelo preliminar.")
+                else:
+                    st.error("La soldadura shear lug-placa no cumple en este modelo preliminar.")
+
+            st.info(
+                "Este módulo usa un modelo preliminar de filete concéntricamente cargado basado en AISC J2. "
+                "Para grupos excéntricos, el Manual AISC permite usar métodos de grupo de soldadura/centro instantáneo."
+            )
+
+            st.warning(
+                "Si la base forma parte de un sistema sísmico especial, las soldaduras de column-to-base plate "
+                "pueden tener requisitos adicionales en AISC 341 / AWS D1.8."
+            )
+    with tab12:
         st.subheader("Modo biaxial")
         st.info(
             "Aquí irá el módulo biaxial una vez que cerremos y depuremos bien el flujo uniaxial."
         )
 
-    with tab12:
+    with tab13:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
         st.write("- Base geométrica")
@@ -2716,8 +2987,9 @@ try:
         st.write("- Módulo 7 concreto en cortante")
         st.write("- Módulo 8 requisitos geométricos ACI 17.9")
         st.write("- Módulo 9 mecanismo de cortante en la base")
+        st.write("- Módulo 10 soldadura preliminar")
         st.write("**Siguiente módulo a integrar:**")
-        st.write("- Módulo 10: soldadura columna-placa y, si aplica, soldadura del shear lug")
+        st.write("- Módulo 11: rama biaxial")
 
 except Exception as exc:
     st.error(f"Error en los datos de entrada: {exc}")
