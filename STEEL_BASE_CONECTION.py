@@ -2552,14 +2552,82 @@ def docx_add_key_value_table(doc: Document, rows_data: list, title: str = None):
 
 
 def docx_add_image(doc: Document, image_path: str, caption: str = None, width_inches: float = 5.8):
-    doc.add_picture(image_path, width=Inches(width_inches))
+    """
+    Inserta imagen centrada con caption.
+    """
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run()
+    run.add_picture(image_path, width=Inches(width_inches))
+
     if caption:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.add_run(caption)
+        pcap = doc.add_paragraph()
+        pcap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = pcap.add_run(caption)
         r.italic = True
         r.font.size = Pt(9)
 
+def get_graph_interpretation(graph_key: str, analysis_mode: str, module2_results=None, module11_results=None, module12_results=None):
+    """
+    Devuelve un texto corto interpretando la gráfica.
+    """
+
+    if graph_key == "uniaxial_pressure":
+        if module2_results is not None:
+            if module2_results["case"] == "full_compression":
+                return (
+                    "La gráfica muestra la distribución uniaxial de presión de contacto bajo la placa. "
+                    "Se observa que toda la longitud analizada permanece en compresión, por lo que no se "
+                    "detecta levantamiento en este caso uniaxial."
+                )
+            else:
+                return (
+                    "La gráfica muestra una distribución uniaxial con compresión parcial. "
+                    "Solo una parte de la placa permanece en contacto efectivo con el concreto, "
+                    "lo que indica levantamiento en la zona opuesta."
+                )
+
+    elif graph_key == "uniaxial_anchor_tension":
+        return (
+            "La gráfica muestra la distribución de tracción en los pernos para el análisis uniaxial. "
+            "Los pernos con mayor intensidad corresponden a la fila extrema del lado traccionado."
+        )
+
+    elif graph_key == "biaxial_elastic_pressure":
+        if module11_results is not None:
+            if module11_results["possible_uplift"]:
+                return (
+                    "El mapa representa la presión biaxial elástica q(x,y). "
+                    "Las zonas con presión negativa indican tendencia al levantamiento de la placa."
+                )
+            else:
+                return (
+                    "El mapa representa la presión biaxial elástica q(x,y). "
+                    "Toda la placa permanece en compresión dentro de esta evaluación preliminar."
+                )
+
+    elif graph_key == "biaxial_contact_pressure":
+        return (
+            "El mapa muestra únicamente la presión de contacto positiva q⁺(x,y), es decir, "
+            "la parte de la placa que realmente comprime el concreto. "
+            "Las regiones en blanco corresponden a zonas sin contacto efectivo."
+        )
+
+    elif graph_key == "biaxial_anchor_tension":
+        if module12_results is not None:
+            if module12_results["possible_uplift"]:
+                return (
+                    "La gráfica muestra la distribución refinada de tracción en el grupo de pernos "
+                    "para el caso biaxial. Los pernos con mayor intensidad son los más demandados "
+                    "por el levantamiento estimado de la placa."
+                )
+            else:
+                return (
+                    "La gráfica muestra la distribución refinada de tracción en pernos para el caso biaxial. "
+                    "En este caso no se observa levantamiento significativo, por lo que la tracción en pernos es reducida o nula."
+                )
+
+    return "La figura presenta el resultado gráfico asociado al módulo de análisis correspondiente."
 
 def save_figure_to_temp(fig, filename_stub: str):
     tmp_dir = tempfile.gettempdir()
@@ -2913,16 +2981,27 @@ def module15_generate_word_report(
         image_paths.append((key, img_path))
 
     captions = {
-        "uniaxial_pressure": "Distribución uniaxial de presión de contacto.",
-        "uniaxial_anchor_tension": "Distribución de tracción en pernos para el análisis uniaxial.",
-        "biaxial_elastic_pressure": "Mapa de presión biaxial elástica q(x,y).",
-        "biaxial_contact_pressure": "Mapa de presión de contacto positiva q⁺(x,y).",
-        "biaxial_anchor_tension": "Distribución refinada de tracción en pernos para el análisis biaxial.",
+        "uniaxial_pressure": "Figura 1. Distribución uniaxial de presión de contacto.",
+        "uniaxial_anchor_tension": "Figura 2. Distribución de tracción en pernos para el análisis uniaxial.",
+        "biaxial_elastic_pressure": "Figura 3. Mapa de presión biaxial elástica q(x,y).",
+        "biaxial_contact_pressure": "Figura 4. Mapa de presión de contacto positiva q⁺(x,y).",
+        "biaxial_anchor_tension": "Figura 5. Distribución refinada de tracción en pernos para el análisis biaxial.",
     }
 
     for key, path in image_paths:
         if os.path.exists(path):
-            docx_add_image(doc, path, caption=captions.get(key, key))
+            docx_add_image(doc, path, caption=captions.get(key, key), width_inches=5.8)
+
+            interpretation = get_graph_interpretation(
+                graph_key=key,
+                analysis_mode=analysis_mode,
+                module2_results=module2_results,
+                module11_results=module11_results,
+                module12_results=module12_results,
+            )
+
+            docx_add_normal_paragraph(doc, interpretation)
+            doc.add_paragraph("")
 
     # --------------------------------------------------------
     # 4. Conclusión
@@ -4586,22 +4665,22 @@ try:
 
         if analysis_mode == "Uniaxial":
             st.markdown("### Distribución de presión uniaxial")
-            st.pyplot(module14_figs["uniaxial_pressure"], clear_figure=True)
+            st.pyplot(module14_figs["uniaxial_pressure"], clear_figure=False)
 
             st.markdown("### Tracción en pernos")
-            st.pyplot(module14_figs["uniaxial_anchor_tension"], clear_figure=True)
+            st.pyplot(module14_figs["uniaxial_anchor_tension"], clear_figure=False)
 
         elif analysis_mode == "Biaxial":
             if "biaxial_elastic_pressure" in module14_figs:
                 st.markdown("### Presión biaxial elástica")
-                st.pyplot(module14_figs["biaxial_elastic_pressure"], clear_figure=True)
+                st.pyplot(module14_figs["biaxial_elastic_pressure"], clear_figure=False)
 
             if "biaxial_contact_pressure" in module14_figs:
                 st.markdown("### Presión de contacto biaxial")
-                st.pyplot(module14_figs["biaxial_contact_pressure"], clear_figure=True)
+                st.pyplot(module14_figs["biaxial_contact_pressure"], clear_figure=False)
 
             st.markdown("### Tracción refinada en pernos")
-            st.pyplot(module14_figs["biaxial_anchor_tension"], clear_figure=True)
+            st.pyplot(module14_figs["biaxial_anchor_tension"], clear_figure=False)
     with tab16:
         st.subheader("Resumen")
 
