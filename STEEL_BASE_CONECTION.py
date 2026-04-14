@@ -980,6 +980,144 @@ def module6_concrete_tension(
     }
 
 # ============================================================
+# MÓDULO 7 - CONCRETO EN CORTANTE (ACI 17 PARCIAL)
+# ============================================================
+
+def module7_concrete_shear(
+    loads: Loads,
+    anchors: AnchorLayout,
+    bolt_df: pd.DataFrame,
+    module6_results: dict,
+    analysis_mode: str,
+    uniaxial_axis: str,
+    lambda_a: float,
+    phi_concrete_shear: float,
+    ca1_shear_mm: float,
+    member_thickness_for_shear_mm: float,
+) -> dict:
+    """
+    Módulo 7:
+    revisión preliminar del concreto en cortante.
+
+    Incluye:
+    - concrete breakout en shear (forma simplificada provisional)
+    - pryout
+    - interacción concreto tensión-cortante con exponente 5/3
+
+    Importante:
+    Esta versión todavía NO incluye todos los modificadores completos
+    de ACI 17.7.2; se usa una formulación simplificada para depuración.
+    """
+
+    if analysis_mode != "Uniaxial":
+        return None
+
+    fc_MPa = module6_results["fc_MPa"]
+    hef_mm = module6_results["hef_mm"]
+
+    # --------------------------------------------------------
+    # Cortante demandado del grupo
+    # --------------------------------------------------------
+    if uniaxial_axis == "x":
+        Vua_group_N = abs(loads.Vux_kN) * 1_000.0
+    elif uniaxial_axis == "y":
+        Vua_group_N = abs(loads.Vuy_kN) * 1_000.0
+    else:
+        raise ValueError("El eje uniaxial debe ser 'x' o 'y'.")
+
+    # --------------------------------------------------------
+    # Área proyectada simplificada para shear breakout
+    # Tomamos la extensión del grupo en dirección perpendicular al cortante
+    # más 1.5 ca1 a cada lado.
+    # --------------------------------------------------------
+    if uniaxial_axis == "x":
+        # cortante en x -> extensión perpendicular ~ y
+        y_min = bolt_df["y_mm"].min()
+        y_max = bolt_df["y_mm"].max()
+        group_span_perp_mm = y_max - y_min
+    else:
+        # cortante en y -> extensión perpendicular ~ x
+        x_min = bolt_df["x_mm"].min()
+        x_max = bolt_df["x_mm"].max()
+        group_span_perp_mm = x_max - x_min
+
+    # área proyectada simplificada
+    AVco_mm2 = 4.5 * ca1_shear_mm**2
+    AVc_mm2 = (group_span_perp_mm + 3.0 * ca1_shear_mm) * (1.5 * ca1_shear_mm)
+
+    # --------------------------------------------------------
+    # Concrete breakout básico en shear
+    # FORMA SIMPLIFICADA PROVISIONAL
+    # --------------------------------------------------------
+    Vb_N = 16.0 * lambda_a * math.sqrt(fc_MPa) * (ca1_shear_mm ** 1.5)
+
+    Vcbg_N = (AVc_mm2 / AVco_mm2) * Vb_N
+    phiVcbg_N = phi_concrete_shear * Vcbg_N
+
+    # --------------------------------------------------------
+    # Pryout
+    # ACI commentary: kcp ~ 1 a 2
+    # menor valor para anclajes cortos
+    # --------------------------------------------------------
+    if hef_mm < 63.5:
+        kcp = 1.0
+    else:
+        kcp = 2.0
+
+    # Se usa Ncbg del módulo 6 para estimar pryout
+    Vcpg_N = kcp * (module6_results["Ncbg_kN"] * 1_000.0)
+    phiVcpg_N = phi_concrete_shear * Vcpg_N
+
+    # --------------------------------------------------------
+    # Resistencia gobernante en cortante del concreto
+    # --------------------------------------------------------
+    phiVn_cg_N = min(phiVcbg_N, phiVcpg_N)
+
+    shear_concrete_ok = Vua_group_N <= phiVn_cg_N
+
+    # --------------------------------------------------------
+    # Interacción concreto N-V con exponente 5/3
+    # --------------------------------------------------------
+    phiNn_cg_N = module6_results["phiNn_cg_kN"] * 1_000.0
+    Nua_group_N = module6_results["Nua_group_kN"] * 1_000.0
+
+    tension_term = (Nua_group_N / phiNn_cg_N) ** (5.0 / 3.0) if phiNn_cg_N > 0 else float("inf")
+    shear_term = (Vua_group_N / phiVn_cg_N) ** (5.0 / 3.0) if phiVn_cg_N > 0 else float("inf")
+
+    interaction_concrete = tension_term + shear_term
+    interaction_concrete_ok = interaction_concrete <= 1.0
+
+    # --------------------------------------------------------
+    # Advertencia de espesor de miembro
+    # --------------------------------------------------------
+    thickness_warning = member_thickness_for_shear_mm < 1.5 * ca1_shear_mm
+
+    return {
+        "phi_concrete_shear": phi_concrete_shear,
+        "fc_MPa": fc_MPa,
+        "hef_mm": hef_mm,
+        "lambda_a": lambda_a,
+        "ca1_shear_mm": ca1_shear_mm,
+        "AVco_mm2": AVco_mm2,
+        "AVc_mm2": AVc_mm2,
+        "Vb_kN": Vb_N / 1_000.0,
+        "Vcbg_kN": Vcbg_N / 1_000.0,
+        "phiVcbg_kN": phiVcbg_N / 1_000.0,
+        "kcp": kcp,
+        "Vcpg_kN": Vcpg_N / 1_000.0,
+        "phiVcpg_kN": phiVcpg_N / 1_000.0,
+        "phiVn_cg_kN": phiVn_cg_N / 1_000.0,
+        "Vua_group_kN": Vua_group_N / 1_000.0,
+        "shear_concrete_ok": shear_concrete_ok,
+        "Nua_group_kN": Nua_group_N / 1_000.0,
+        "phiNn_cg_kN": phiNn_cg_N / 1_000.0,
+        "interaction_concrete": interaction_concrete,
+        "interaction_concrete_ok": interaction_concrete_ok,
+        "member_thickness_for_shear_mm": member_thickness_for_shear_mm,
+        "thickness_warning": thickness_warning,
+        "group_span_perp_mm": group_span_perp_mm,
+    }
+# ============================================================
 # FUNCIONES DE GRÁFICO
 # ============================================================
 
@@ -1196,6 +1334,28 @@ with st.sidebar.expander("Módulo 6 - concreto en tensión", expanded=False):
         index=0
     )
 
+with st.sidebar.expander("Módulo 7 - concreto en cortante", expanded=False):
+    phi_concrete_shear = st.number_input(
+        "φ concreto en cortante",
+        min_value=0.01,
+        max_value=1.00,
+        value=0.70,
+        step=0.01
+    )
+
+    ca1_shear_mm = st.number_input(
+        "ca1, shear [mm] (borde en dirección del cortante)",
+        min_value=0.001,
+        value=250.0,
+        step=5.0
+    )
+
+    member_thickness_for_shear_mm = st.number_input(
+        "ha [mm] (espesor del miembro para shear breakout)",
+        min_value=0.001,
+        value=500.0,
+        step=5.0
+    )
     service_cracked = st.checkbox(
         "¿La región está agrietada a nivel de servicio?",
         value=True
@@ -1471,10 +1631,29 @@ try:
         )
     else:
         module6_results = None
+
+    # --------------------------------------------------------
+    # MÓDULO 7
+    # --------------------------------------------------------
+    if analysis_mode == "Uniaxial":
+        module7_results = module7_concrete_shear(
+            loads=loads,
+            anchors=anchors,
+            bolt_df=bolt_df,
+            module6_results=module6_results,
+            analysis_mode=analysis_mode,
+            uniaxial_axis=uniaxial_axis,
+            lambda_a=lambda_a,
+            phi_concrete_shear=phi_concrete_shear,
+            ca1_shear_mm=ca1_shear_mm,
+            member_thickness_for_shear_mm=member_thickness_for_shear_mm,
+        )
+    else:
+        module7_results = None
     # --------------------------------------------------------
     # PESTAÑAS
     # --------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "Datos y geometría",
     "Módulo 1 - Uniaxial",
     "Módulo 2 - Compresión",
@@ -1482,6 +1661,7 @@ try:
     "Módulo 4 - Espesor",
     "Módulo 5 - Acero anclaje",
     "Módulo 6 - Concreto tensión",
+    "Módulo 7 - Concreto cortante",
     "Biaxial",
     "Resumen",
     ])
@@ -1833,12 +2013,64 @@ try:
                 st.error("El anclaje al concreto no cumple preliminarmente en tensión para los modos incluidos.")
 
     with tab8:
+        st.subheader("Módulo 7 - concreto en cortante")
+
+        if analysis_mode != "Uniaxial":
+            st.info("En la barra lateral elegiste modo Biaxial. Cambia a Uniaxial para activar este módulo.")
+        else:
+            mod7_rows = [
+                ["φ concreto en cortante", f"{module7_results['phi_concrete_shear']:.3f}"],
+                ["f'c [MPa]", f"{module7_results['fc_MPa']:.3f}"],
+                ["hef [mm]", f"{module7_results['hef_mm']:.3f}"],
+                ["λa", f"{module7_results['lambda_a']:.3f}"],
+                ["ca1, shear [mm]", f"{module7_results['ca1_shear_mm']:.3f}"],
+                ["Extensión perpendicular del grupo [mm]", f"{module7_results['group_span_perp_mm']:.3f}"],
+                ["A_Vco [mm²]", f"{module7_results['AVco_mm2']:.3f}"],
+                ["A_Vc [mm²]", f"{module7_results['AVc_mm2']:.3f}"],
+                ["Vb básico [kN]", f"{module7_results['Vb_kN']:.5f}"],
+                ["Vcbg [kN]", f"{module7_results['Vcbg_kN']:.5f}"],
+                ["φVcbg [kN]", f"{module7_results['phiVcbg_kN']:.5f}"],
+                ["kcp", f"{module7_results['kcp']:.3f}"],
+                ["Vcpg [kN]", f"{module7_results['Vcpg_kN']:.5f}"],
+                ["φVcpg [kN]", f"{module7_results['phiVcpg_kN']:.5f}"],
+                ["Resistencia gobernante φVn,cg [kN]", f"{module7_results['phiVn_cg_kN']:.5f}"],
+                ["Vua grupo [kN]", f"{module7_results['Vua_group_kN']:.5f}"],
+                ["Chequeo concreto en cortante", "Cumple" if module7_results["shear_concrete_ok"] else "No cumple"],
+                ["Nua grupo [kN]", f"{module7_results['Nua_group_kN']:.5f}"],
+                ["φNn,cg [kN]", f"{module7_results['phiNn_cg_kN']:.5f}"],
+                ["Interacción concreto N-V", f"{module7_results['interaction_concrete']:.5f}"],
+                ["Chequeo interacción concreta", "Cumple" if module7_results["interaction_concrete_ok"] else "No cumple"],
+                ["ha [mm]", f"{module7_results['member_thickness_for_shear_mm']:.3f}"],
+                ["Advertencia de espesor de miembro", "Sí" if module7_results["thickness_warning"] else "No"],
+            ]
+
+            mod7_df = pd.DataFrame(mod7_rows, columns=["Parámetro", "Valor"])
+            st.dataframe(mod7_df, use_container_width=True, hide_index=True)
+
+            st.warning(
+                "Este Módulo 7 usa una formulación simplificada provisional para concrete breakout en cortante, "
+                "pensada para depuración del flujo del programa. Los modificadores completos de ACI 17.7.2 "
+                "todavía no están integrados."
+            )
+
+            if module7_results["thickness_warning"]:
+                st.warning(
+                    "El espesor del miembro ha es menor que 1.5·ca1,shear. Esto puede afectar la validez "
+                    "del shear breakout simplificado."
+                )
+
+            if module7_results["interaction_concrete_ok"]:
+                st.success("El concreto cumple preliminarmente en cortante e interacción N-V.")
+            else:
+                st.error("El concreto no cumple preliminarmente en cortante o en interacción N-V.")
+
+    with tab9:
         st.subheader("Modo biaxial")
         st.info(
             "Aquí irá el módulo biaxial una vez que cerremos y depuremos bien el flujo uniaxial."
         )
 
-    with tab9:
+    with tab10:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
         st.write("- Base geométrica")
@@ -1848,8 +2080,9 @@ try:
         st.write("- Módulo 4 espesor de placa")
         st.write("- Módulo 5 acero del anclaje")
         st.write("- Módulo 6 concreto en tensión (ACI 17 parcial)")
+        st.write("- Módulo 7 concreto en cortante (ACI 17 parcial)")
         st.write("**Siguiente módulo a integrar:**")
-        st.write("- Módulo 7: concreto en cortante (breakout en shear + pryout) e interacción concreta")
+        st.write("- Módulo 8: mínimos geométricos ACI 17.9 y chequeos de borde/espaciamiento/espesor")
 
 except Exception as exc:
     st.error(f"Error en los datos de entrada: {exc}")
