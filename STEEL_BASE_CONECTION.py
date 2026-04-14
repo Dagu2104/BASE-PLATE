@@ -622,6 +622,146 @@ def module4_plate_thickness(
         "thickness_ok": thickness_ok,
         "utilization": utilization,
     }
+# ============================================================
+# MÓDULO 5 - ACERO DEL ANCLAJE
+# ============================================================
+
+def module5_anchor_steel_strength(
+    loads: Loads,
+    materials: Materials,
+    anchors: AnchorLayout,
+    layout_info: dict,
+    module3_results: dict,
+    analysis_mode: str,
+    uniaxial_axis: str,
+    anchor_type: str,
+    phi_anchor_tension_steel: float,
+    phi_anchor_shear_steel: float,
+    use_built_up_grout_pad: bool,
+) -> dict:
+    """
+    Módulo 5:
+    revisión preliminar del acero del anclaje.
+
+    Base:
+    - Tensión: Nsa = Ase,N * futa
+    - Cortante:
+        headed_stud -> Vsa = Ase,V * futa
+        headed_bolt / hooked_bolt / adhesive_anchor -> Vsa = 0.6 * Ase,V * futa
+    - Si built-up grout pad: Vsa *= 0.80
+    - Interacción acero: (Nua / phiNsa)^2 + (Vua / phiVsa)^2 <= 1
+
+    Hipótesis actuales:
+    - se usa Ab_mm2 como área efectiva tanto para tensión como para cortante
+      en esta etapa preliminar
+    - en uniaxial, el cortante demandado se toma como:
+        axis = x -> Vux
+        axis = y -> Vuy
+    - el cortante se reparte uniformemente entre todos los pernos
+    - la tensión se toma del perno crítico del Módulo 3
+    """
+
+    if analysis_mode != "Uniaxial":
+        return None
+
+    # --------------------------------------------------------
+    # Área efectiva preliminar
+    # --------------------------------------------------------
+    AseN_mm2 = anchors.Ab_mm2
+    AseV_mm2 = anchors.Ab_mm2
+
+    # --------------------------------------------------------
+    # Resistencia efectiva del material del anclaje
+    # futa <= min(Fu, 1.9*Fy, 860 MPa)
+    # --------------------------------------------------------
+    futa_eff_MPa = min(
+        materials.Fu_anchor_MPa,
+        1.9 * materials.Fy_anchor_MPa,
+        860.0
+    )
+
+    # --------------------------------------------------------
+    # Resistencia nominal en tensión
+    # --------------------------------------------------------
+    Nsa_N = AseN_mm2 * futa_eff_MPa
+
+    # --------------------------------------------------------
+    # Resistencia nominal en cortante
+    # --------------------------------------------------------
+    if anchor_type == "headed_stud":
+        Vsa_N = AseV_mm2 * futa_eff_MPa
+    elif anchor_type in ["headed_bolt", "hooked_bolt", "adhesive_anchor"]:
+        Vsa_N = 0.60 * AseV_mm2 * futa_eff_MPa
+    else:
+        raise ValueError("Tipo de anclaje no reconocido en Módulo 5.")
+
+    if use_built_up_grout_pad:
+        Vsa_N *= 0.80
+
+    # --------------------------------------------------------
+    # Resistencias de diseño
+    # --------------------------------------------------------
+    phiNsa_N = phi_anchor_tension_steel * Nsa_N
+    phiVsa_N = phi_anchor_shear_steel * Vsa_N
+
+    # --------------------------------------------------------
+    # Demanda de tensión por perno crítico
+    # --------------------------------------------------------
+    if module3_results["tension_active"]:
+        Nua_per_bolt_N = module3_results["T_per_bolt_kN"] * 1_000.0
+    else:
+        Nua_per_bolt_N = 0.0
+
+    # --------------------------------------------------------
+    # Demanda de cortante por perno
+    # --------------------------------------------------------
+    total_bolts = layout_info["total_bolts"]
+
+    if uniaxial_axis == "x":
+        Vua_total_N = abs(loads.Vux_kN) * 1_000.0
+    elif uniaxial_axis == "y":
+        Vua_total_N = abs(loads.Vuy_kN) * 1_000.0
+    else:
+        raise ValueError("El eje uniaxial debe ser 'x' o 'y'.")
+
+    Vua_per_bolt_N = Vua_total_N / total_bolts if total_bolts > 0 else 0.0
+
+    # --------------------------------------------------------
+    # Interacción acero-acero
+    # --------------------------------------------------------
+    tension_ratio = Nua_per_bolt_N / phiNsa_N if phiNsa_N > 0 else float("inf")
+    shear_ratio = Vua_per_bolt_N / phiVsa_N if phiVsa_N > 0 else float("inf")
+
+    interaction_value = tension_ratio**2 + shear_ratio**2
+
+    tension_ok = Nua_per_bolt_N <= phiNsa_N
+    shear_ok = Vua_per_bolt_N <= phiVsa_N
+    interaction_ok = interaction_value <= 1.0
+
+    return {
+        "anchor_type": anchor_type,
+        "AseN_mm2": AseN_mm2,
+        "AseV_mm2": AseV_mm2,
+        "fya_MPa": materials.Fy_anchor_MPa,
+        "futa_input_MPa": materials.Fu_anchor_MPa,
+        "futa_eff_MPa": futa_eff_MPa,
+        "phi_anchor_tension_steel": phi_anchor_tension_steel,
+        "phi_anchor_shear_steel": phi_anchor_shear_steel,
+        "Nsa_kN": Nsa_N / 1_000.0,
+        "Vsa_kN": Vsa_N / 1_000.0,
+        "phiNsa_kN": phiNsa_N / 1_000.0,
+        "phiVsa_kN": phiVsa_N / 1_000.0,
+        "Nua_per_bolt_kN": Nua_per_bolt_N / 1_000.0,
+        "Vua_per_bolt_kN": Vua_per_bolt_N / 1_000.0,
+        "tension_ratio": tension_ratio,
+        "shear_ratio": shear_ratio,
+        "interaction_value": interaction_value,
+        "tension_ok": tension_ok,
+        "shear_ok": shear_ok,
+        "interaction_ok": interaction_ok,
+        "use_built_up_grout_pad": use_built_up_grout_pad,
+        "total_bolts": total_bolts,
+    }
 
 # ============================================================
 # FUNCIONES DE GRÁFICO
@@ -805,6 +945,34 @@ with st.sidebar.expander("Pernos", expanded=True):
     Ab_mm2 = st.number_input("Ab [mm²]", min_value=0.001, value=245.0)
     hef_mm = st.number_input("hef [mm]", min_value=0.001, value=300.0)
 
+with st.sidebar.expander("Módulo 5 - acero del anclaje", expanded=False):
+    anchor_type = st.selectbox(
+        "Tipo de anclaje para acero",
+        ["headed_bolt", "hooked_bolt", "headed_stud", "adhesive_anchor"],
+        index=0
+    )
+
+    use_built_up_grout_pad = st.checkbox(
+        "¿Hay built-up grout pad?",
+        value=False
+    )
+
+    phi_anchor_tension_steel = st.number_input(
+        "φ acero en tensión",
+        min_value=0.01,
+        max_value=1.00,
+        value=0.75,
+        step=0.01
+    )
+
+    phi_anchor_shear_steel = st.number_input(
+        "φ acero en cortante",
+        min_value=0.01,
+        max_value=1.00,
+        value=0.65,
+        step=0.01
+    )
+
 with st.sidebar.expander("Pedestal", expanded=True):
     B_ped_mm = st.number_input("B pedestal [mm]", min_value=0.001, value=900.0)
     N_ped_mm = st.number_input("N pedestal [mm]", min_value=0.001, value=900.0)
@@ -970,14 +1138,35 @@ try:
         module4_results = None
 
     # --------------------------------------------------------
+    # MÓDULO 5
+    # --------------------------------------------------------
+    if analysis_mode == "Uniaxial":
+        module5_results = module5_anchor_steel_strength(
+            loads=loads,
+            materials=materials,
+            anchors=anchors,
+            layout_info=layout_info,
+            module3_results=module3_results,
+            analysis_mode=analysis_mode,
+            uniaxial_axis=uniaxial_axis,
+            anchor_type=anchor_type,
+            phi_anchor_tension_steel=phi_anchor_tension_steel,
+            phi_anchor_shear_steel=phi_anchor_shear_steel,
+            use_built_up_grout_pad=use_built_up_grout_pad,
+        )
+    else:
+        module5_results = None
+
+    # --------------------------------------------------------
     # PESTAÑAS
     # --------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "Datos y geometría",
     "Módulo 1 - Uniaxial",
     "Módulo 2 - Compresión",
     "Módulo 3 - Pernos",
     "Módulo 4 - Espesor",
+    "Módulo 5 - Acero anclaje",
     "Biaxial",
     "Resumen",
     ])
@@ -1214,12 +1403,73 @@ try:
     
 
     with tab6:
+        st.subheader("Módulo 5 - acero del anclaje")
+
+        if analysis_mode != "Uniaxial":
+            st.info("En la barra lateral elegiste modo Biaxial. Cambia a Uniaxial para activar este módulo.")
+        else:
+            mod5_df = pd.DataFrame({
+                "Parámetro": [
+                    "Tipo de anclaje",
+                    "Área efectiva tensión Ase,N [mm²]",
+                    "Área efectiva cortante Ase,V [mm²]",
+                    "fy anclaje [MPa]",
+                    "fu anclaje ingresado [MPa]",
+                    "futa efectivo usado [MPa]",
+                    "φ acero tensión",
+                    "φ acero cortante",
+                    "Nsa nominal [kN]",
+                    "Vsa nominal [kN]",
+                    "φNsa [kN]",
+                    "φVsa [kN]",
+                    "Nua por perno [kN]",
+                    "Vua por perno [kN]",
+                    "Relación tensión",
+                    "Relación cortante",
+                    "Interacción acero",
+                    "Chequeo tensión",
+                    "Chequeo cortante",
+                    "Chequeo interacción",
+                    "Built-up grout pad",
+                ],
+                "Valor": [
+                    module5_results["anchor_type"],
+                    f"{module5_results['AseN_mm2']:.3f}",
+                    f"{module5_results['AseV_mm2']:.3f}",
+                    f"{module5_results['fya_MPa']:.3f}",
+                    f"{module5_results['futa_input_MPa']:.3f}",
+                    f"{module5_results['futa_eff_MPa']:.3f}",
+                    f"{module5_results['phi_anchor_tension_steel']:.3f}",
+                    f"{module5_results['phi_anchor_shear_steel']:.3f}",
+                    f"{module5_results['Nsa_kN']:.5f}",
+                    f"{module5_results['Vsa_kN']:.5f}",
+                    f"{module5_results['phiNsa_kN']:.5f}",
+                    f"{module5_results['phiVsa_kN']:.5f}",
+                    f"{module5_results['Nua_per_bolt_kN']:.5f}",
+                    f"{module5_results['Vua_per_bolt_kN']:.5f}",
+                    f"{module5_results['tension_ratio']:.5f}",
+                    f"{module5_results['shear_ratio']:.5f}",
+                    f"{module5_results['interaction_value']:.5f}",
+                    "Cumple" if module5_results["tension_ok"] else "No cumple",
+                    "Cumple" if module5_results["shear_ok"] else "No cumple",
+                    "Cumple" if module5_results["interaction_ok"] else "No cumple",
+                    "Sí" if module5_results["use_built_up_grout_pad"] else "No",
+                ],
+            })
+            st.dataframe(mod5_df, use_container_width=True, hide_index=True)
+
+            if module5_results["interaction_ok"]:
+                st.success("El acero del anclaje cumple preliminarmente en tensión, cortante e interacción.")
+            else:
+                st.error("El acero del anclaje no cumple preliminarmente. Revisa diámetro, área o cantidad de pernos.")
+
+    with tab7:
         st.subheader("Modo biaxial")
         st.info(
             "Aquí irá el módulo biaxial una vez que cerremos y depuremos bien el flujo uniaxial."
         )
 
-    with tab7:
+    with tab8:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
         st.write("- Base geométrica")
@@ -1227,8 +1477,9 @@ try:
         st.write("- Módulo 2 compresión bajo placa")
         st.write("- Módulo 3 tracción preliminar en pernos")
         st.write("- Módulo 4 espesor de placa")
+        st.write("- Módulo 5 acero del anclaje")
         st.write("**Siguiente módulo a integrar:**")
-        st.write("- Módulo 5: acero del perno (tracción y cortante)")
+        st.write("- Módulo 6: anclaje al concreto con ACI 318-25 Capítulo 17")
 
 except Exception as exc:
     st.error(f"Error en los datos de entrada: {exc}")
