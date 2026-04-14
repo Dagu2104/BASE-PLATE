@@ -545,6 +545,84 @@ def module3_uniaxial_anchor_tension(
         "critical_bolts": critical_bolts,
         "tension_coord_mm": tension_coord,
     }
+
+# ============================================================
+# MÓDULO 4 - ESPESOR DE PLACA
+# ============================================================
+
+def module4_plate_thickness(
+    base_plate: BasePlateGeometry,
+    column: ColumnGeometry,
+    materials: Materials,
+    module2_results: dict,
+) -> dict:
+    """
+    Módulo 4:
+    cálculo preliminar del espesor mínimo de la placa base.
+
+    Hipótesis:
+    - la placa trabaja como franja en voladizo
+    - se usa la presión máxima de contacto del Módulo 2 como presión gobernante
+    - se toma el voladizo crítico entre ambas direcciones
+    - resistencia a flexión simplificada de la placa:
+          t_req = m * sqrt( 2*q / (phi*Fy) )
+
+    Unidades:
+    - q en MPa = N/mm²
+    - Fy en MPa
+    - m en mm
+    - t_req en mm
+    """
+
+    B_mm = base_plate.B_bp_mm
+    N_mm = base_plate.N_bp_mm
+    tp_mm = base_plate.tp_mm
+
+    bf_mm = column.bf_col_mm
+    d_mm = column.d_col_mm
+
+    Fy_MPa = materials.Fy_plate_MPa
+    phi_flexure = 0.90
+
+    # Voladizos geométricos libres
+    mx_mm = (B_mm - bf_mm) / 2.0
+    my_mm = (N_mm - d_mm) / 2.0
+
+    if mx_mm <= 0:
+        raise ValueError("El voladizo libre mx no es positivo. Revisa B y bf.")
+    if my_mm <= 0:
+        raise ValueError("El voladizo libre my no es positivo. Revisa N y d.")
+
+    # Voladizo crítico
+    mcrit_mm = max(mx_mm, my_mm)
+
+    # Presión gobernante obtenida del módulo 2
+    q_u_MPa = module2_results["q_max_MPa"]
+
+    # Espesor mínimo requerido
+    t_req_mm = mcrit_mm * math.sqrt((2.0 * q_u_MPa) / (phi_flexure * Fy_MPa))
+
+    # Utilización
+    thickness_ok = tp_mm >= t_req_mm
+    utilization = t_req_mm / tp_mm if tp_mm > 0 else float("inf")
+
+    return {
+        "B_mm": B_mm,
+        "N_mm": N_mm,
+        "bf_mm": bf_mm,
+        "d_mm": d_mm,
+        "mx_mm": mx_mm,
+        "my_mm": my_mm,
+        "mcrit_mm": mcrit_mm,
+        "q_u_MPa": q_u_MPa,
+        "Fy_MPa": Fy_MPa,
+        "phi_flexure": phi_flexure,
+        "tp_input_mm": tp_mm,
+        "t_req_mm": t_req_mm,
+        "thickness_ok": thickness_ok,
+        "utilization": utilization,
+    }
+
 # ============================================================
 # FUNCIONES DE GRÁFICO
 # ============================================================
@@ -879,16 +957,30 @@ try:
         module3_results = None   
 
     # --------------------------------------------------------
+    # MÓDULO 4
+    # --------------------------------------------------------
+    if analysis_mode == "Uniaxial":
+        module4_results = module4_plate_thickness(
+            base_plate=base_plate,
+            column=column,
+            materials=materials,
+            module2_results=module2_results,
+        )
+    else:
+        module4_results = None
+
+    # --------------------------------------------------------
     # PESTAÑAS
     # --------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "Datos y geometría",
     "Módulo 1 - Uniaxial",
     "Módulo 2 - Compresión",
     "Módulo 3 - Pernos",
+    "Módulo 4 - Espesor",
     "Biaxial",
     "Resumen",
-])
+    ])
 
     with tab1:
         st.subheader("Resumen de datos de entrada")
@@ -1069,20 +1161,74 @@ try:
                     "El siguiente módulo verificará el espesor de placa."
                 )
     
-
     with tab5:
+        st.subheader("Módulo 4 - espesor mínimo de placa")
+
+        if analysis_mode != "Uniaxial":
+            st.info("En la barra lateral elegiste modo Biaxial. Cambia a Uniaxial para activar este módulo.")
+        else:
+            mod4_df = pd.DataFrame({
+                "Parámetro": [
+                    "B placa [mm]",
+                    "N placa [mm]",
+                    "bf columna [mm]",
+                    "d columna [mm]",
+                    "Voladizo mx [mm]",
+                    "Voladizo my [mm]",
+                    "Voladizo crítico m [mm]",
+                    "Presión gobernante q_u [MPa]",
+                    "Fy placa [MPa]",
+                    "φ flexión",
+                    "Espesor ingresado tp [mm]",
+                    "Espesor requerido t_req [mm]",
+                    "Utilización t_req/tp",
+                    "Chequeo de espesor",
+                ],
+                "Valor": [
+                    f"{module4_results['B_mm']:.3f}",
+                    f"{module4_results['N_mm']:.3f}",
+                    f"{module4_results['bf_mm']:.3f}",
+                    f"{module4_results['d_mm']:.3f}",
+                    f"{module4_results['mx_mm']:.3f}",
+                    f"{module4_results['my_mm']:.3f}",
+                    f"{module4_results['mcrit_mm']:.3f}",
+                    f"{module4_results['q_u_MPa']:.5f}",
+                    f"{module4_results['Fy_MPa']:.3f}",
+                    f"{module4_results['phi_flexure']:.3f}",
+                    f"{module4_results['tp_input_mm']:.3f}",
+                    f"{module4_results['t_req_mm']:.3f}",
+                    f"{module4_results['utilization']:.3f}",
+                    "Cumple" if module4_results["thickness_ok"] else "No cumple",
+                ],
+            })
+            st.dataframe(mod4_df, use_container_width=True, hide_index=True)
+
+            if module4_results["thickness_ok"]:
+                st.success(
+                    "El espesor ingresado de la placa cumple con el espesor mínimo requerido en este modelo simplificado."
+                )
+            else:
+                st.error(
+                    "El espesor ingresado de la placa no cumple. Debe aumentarse el espesor o modificarse la geometría."
+                )
+    
+
+    with tab6:
         st.subheader("Modo biaxial")
         st.info(
             "Aquí irá el módulo biaxial una vez que cerremos y depuremos bien el flujo uniaxial."
         )
 
-    with tab6:
+    with tab7:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
         st.write("- Base geométrica")
         st.write("- Módulo 1 uniaxial preliminar")
+        st.write("- Módulo 2 compresión bajo placa")
+        st.write("- Módulo 3 tracción preliminar en pernos")
+        st.write("- Módulo 4 espesor de placa")
         st.write("**Siguiente módulo a integrar:**")
-        st.write("- Módulo 2: presión uniaxial bajo placa + bloque de compresión")
+        st.write("- Módulo 5: acero del perno (tracción y cortante)")
 
 except Exception as exc:
     st.error(f"Error en los datos de entrada: {exc}")
