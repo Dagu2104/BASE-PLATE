@@ -1890,6 +1890,14 @@ with st.sidebar.expander("Módulo 9 - cortante en la base", expanded=False):
         index=0
     )
 
+    mu = st.number_input(
+        "μ coeficiente de fricción",
+        min_value=0.0,
+        max_value=2.0,
+        value=0.30,
+        step=0.01
+    )
+
     phi_base_friction = st.number_input(
         "φ fricción en la base",
         min_value=0.01,
