@@ -1518,9 +1518,133 @@ def module9_base_shear_transfer(
         "shear_ok": shear_ok,
         "utilization": utilization,
     }
-
 # ============================================================
-# MÓDULO 10 - SOLDADURA
+# AUXILIAR MÓDULO 10 - LONGITUD EFECTIVA DE SOLDADURA
+# ============================================================
+
+def compute_column_weld_length_effective(
+    column_plot: dict,
+    weld_size_mm: float,
+    weld_layout: str,
+    manual_length_mm: float,
+) -> dict:
+    """
+    Calcula la longitud efectiva de soldadura columna-placa
+    en función de la forma del perfil y del patrón de soldadura.
+
+    Además aplica ajustes básicos de AISC:
+    - longitud mínima: 4w
+    - reducción por longitud excesiva J2-1
+    - si l > 300w, l_eff = 180w
+    """
+
+    section_type = column_plot.get("section_type", "W").upper()
+    d = column_plot["d_mm"]
+    bf = column_plot["bf_mm"]
+    tf = column_plot.get("tf_mm", 0.0)
+
+    # --------------------------------------------------------
+    # Longitud geométrica "real" elegida
+    # --------------------------------------------------------
+    if weld_layout == "manual":
+        L_geom_mm = manual_length_mm
+        layout_used = "manual"
+
+    elif weld_layout == "all_perimeter_rect":
+        L_geom_mm = 2.0 * (bf + d)
+        layout_used = "all_perimeter_rect"
+
+    elif section_type in ["W", "H", "I"]:
+        web_clear_mm = max(d - 2.0 * tf, 0.0)
+
+        if weld_layout == "auto_by_section":
+            # por defecto para perfil I: alas + alma accesible
+            L_geom_mm = 2.0 * bf + 2.0 * web_clear_mm
+            layout_used = "flanges_plus_web_auto"
+
+        elif weld_layout == "flanges_only":
+            L_geom_mm = 2.0 * bf
+            layout_used = "flanges_only"
+
+        elif weld_layout == "web_only":
+            L_geom_mm = 2.0 * web_clear_mm
+            layout_used = "web_only"
+
+        elif weld_layout == "flanges_plus_web":
+            L_geom_mm = 2.0 * bf + 2.0 * web_clear_mm
+            layout_used = "flanges_plus_web"
+
+        else:
+            # fallback
+            L_geom_mm = 2.0 * bf + 2.0 * web_clear_mm
+            layout_used = "fallback_flanges_plus_web"
+
+    else:
+        # HSS / BOX / fallback
+        if weld_layout == "auto_by_section":
+            L_geom_mm = 2.0 * (bf + d)
+            layout_used = "all_perimeter_rect_auto"
+        elif weld_layout in ["flanges_only", "web_only", "flanges_plus_web"]:
+            # no tiene sentido directo en HSS, se redirige
+            L_geom_mm = 2.0 * (bf + d)
+            layout_used = "all_perimeter_rect_auto_redirect"
+        else:
+            L_geom_mm = 2.0 * (bf + d)
+            layout_used = "fallback_rect"
+
+    if L_geom_mm <= 0:
+        raise ValueError("La longitud geométrica de soldadura resultó no positiva.")
+
+    # --------------------------------------------------------
+    # AISC J2.2b(c): longitud mínima 4w
+    # si no, el tamaño efectivo no excede l/4
+    # Para mantener el cálculo en términos de longitud efectiva equivalente:
+    # si l < 4w => l_eff = 4*l_actual/w *? no
+    # más limpio: reducimos el tamaño efectivo, no la longitud.
+    # Pero como el módulo usa Aw = 0.707*w*L_eff,
+    # la equivalencia es:
+    # w_eff = l/4  => Aw = 0.707*(l/4)*l
+    # Para no mezclar tamaños, aquí solo emitimos advertencia.
+    # --------------------------------------------------------
+    min_length_ok = L_geom_mm >= 4.0 * weld_size_mm
+
+    # --------------------------------------------------------
+    # AISC J2-1 para soldaduras cargadas por extremo
+    # Se usa aquí como ajuste conservador general para filetes largos.
+    # β = 1.2 - 0.002(l/w) <= 1.0
+    # Si l > 300w -> l_eff = 180w
+    # --------------------------------------------------------
+    if weld_size_mm <= 0:
+        raise ValueError("El tamaño de soldadura debe ser positivo.")
+
+    l_over_w = L_geom_mm / weld_size_mm
+
+    if l_over_w > 300.0:
+        L_eff_mm = 180.0 * weld_size_mm
+        beta = L_eff_mm / L_geom_mm
+        excessive_length_limit_applied = True
+    elif l_over_w > 100.0:
+        beta = min(1.0, 1.2 - 0.002 * l_over_w)
+        beta = max(beta, 0.0)
+        L_eff_mm = beta * L_geom_mm
+        excessive_length_limit_applied = True
+    else:
+        beta = 1.0
+        L_eff_mm = L_geom_mm
+        excessive_length_limit_applied = False
+
+    return {
+        "section_type": section_type,
+        "layout_used": layout_used,
+        "L_geom_mm": L_geom_mm,
+        "L_eff_mm": L_eff_mm,
+        "beta_length": beta,
+        "l_over_w": l_over_w,
+        "min_length_ok": min_length_ok,
+        "excessive_length_limit_applied": excessive_length_limit_applied,
+    }
+# ============================================================
+# MÓDULO 10 - SOLDADURA (DEPURADO)
 # ============================================================
 
 def module10_weld_design(
@@ -1530,39 +1654,26 @@ def module10_weld_design(
     module9_results: dict,
     FEXX_MPa: float,
     phi_weld: float,
-    use_auto_column_weld_length: bool,
     column_weld_size_mm: float,
+    column_weld_layout: str,
     column_weld_length_manual_mm: float,
     provide_shear_lug_weld: bool,
     shear_lug_weld_size_mm: float,
     shear_lug_weld_length_mm: float,
 ) -> dict:
     """
-    Módulo 10:
-    diseño preliminar de soldaduras de filete.
+    Módulo 10 depurado:
+    - soldadura columna-placa según geometría real y patrón elegido
+    - soldadura shear lug-placa
+    - modelo preliminar de filete cargado concéntricamente
 
-    Incluye:
-    - columna a placa base
-    - shear lug a placa base
-
-    Modelo:
-    phiRn = phi * 0.60 * FEXX * (0.707 * w * L_eff)
-
-    Notas:
-    - modelo concéntrico preliminar
-    - no incluye grupo excéntrico de soldadura
-    - no incluye groove welds
-    - no incluye requisitos sísmicos especiales AISC 341 / AWS D1.8
+    Base:
+    phiRn = phi * 0.60 * FEXX * Aw
+    Aw = 0.707 * w * L_eff
     """
 
-    section_type = column_plot.get("section_type", "W").upper()
-    d_mm = column_plot["d_mm"]
-    bf_mm = column_plot["bf_mm"]
-    tf_mm = column_plot.get("tf_mm", 0.0)
-
     # --------------------------------------------------------
-    # Demanda para soldadura columna-placa
-    # Se toma la tracción total del módulo 3
+    # Demanda columna-placa
     # --------------------------------------------------------
     if module3_results["tension_active"]:
         Tu_col_base_kN = module3_results["T_total_kN"]
@@ -1570,31 +1681,29 @@ def module10_weld_design(
         Tu_col_base_kN = 0.0
 
     # --------------------------------------------------------
-    # Longitud de soldadura columna-placa
+    # Longitud efectiva columna-placa
     # --------------------------------------------------------
-    if use_auto_column_weld_length:
-        if section_type in ["W", "H", "I"]:
-            # aproximación del perímetro soldado:
-            # 2 alas completas + 2 lados del alma entre alas
-            web_clear_mm = max(d_mm - 2.0 * tf_mm, 0.0)
-            L_col_weld_eff_mm = 2.0 * bf_mm + 2.0 * web_clear_mm
-        else:
-            # HSS / BOX / fallback rectangular
-            L_col_weld_eff_mm = 2.0 * (bf_mm + d_mm)
-    else:
-        L_col_weld_eff_mm = column_weld_length_manual_mm
+    weld_len_info = compute_column_weld_length_effective(
+        column_plot=column_plot,
+        weld_size_mm=column_weld_size_mm,
+        weld_layout=column_weld_layout,
+        manual_length_mm=column_weld_length_manual_mm,
+    )
+
+    L_col_geom_mm = weld_len_info["L_geom_mm"]
+    L_col_eff_mm = weld_len_info["L_eff_mm"]
 
     # --------------------------------------------------------
-    # Resistencia soldadura columna-placa
+    # Resistencia columna-placa
     # --------------------------------------------------------
-    Aw_col_mm2 = 0.707 * column_weld_size_mm * L_col_weld_eff_mm
+    Aw_col_mm2 = 0.707 * column_weld_size_mm * L_col_eff_mm
     phiRn_col_kN = phi_weld * 0.60 * FEXX_MPa * Aw_col_mm2 / 1_000.0
 
     col_weld_ok = Tu_col_base_kN <= phiRn_col_kN if phiRn_col_kN > 0 else (Tu_col_base_kN == 0.0)
     col_weld_util = Tu_col_base_kN / phiRn_col_kN if phiRn_col_kN > 0 else float("inf")
 
     # --------------------------------------------------------
-    # Demanda para soldadura shear lug-placa
+    # Demanda lug-placa
     # --------------------------------------------------------
     if module9_results["shear_key_required"]:
         Vu_lug_kN = module9_results["Vu_remaining_for_key_kN"]
@@ -1602,9 +1711,12 @@ def module10_weld_design(
         Vu_lug_kN = 0.0
 
     # --------------------------------------------------------
-    # Resistencia soldadura shear lug-placa
+    # Resistencia lug-placa
     # --------------------------------------------------------
     if provide_shear_lug_weld:
+        if shear_lug_weld_size_mm <= 0 or shear_lug_weld_length_mm <= 0:
+            raise ValueError("Para evaluar la soldadura del shear lug, el tamaño y la longitud deben ser positivos.")
+
         Aw_lug_mm2 = 0.707 * shear_lug_weld_size_mm * shear_lug_weld_length_mm
         phiRn_lug_kN = phi_weld * 0.60 * FEXX_MPa * Aw_lug_mm2 / 1_000.0
         lug_weld_ok = Vu_lug_kN <= phiRn_lug_kN if phiRn_lug_kN > 0 else (Vu_lug_kN == 0.0)
@@ -1621,12 +1733,18 @@ def module10_weld_design(
 
         "Tu_col_base_kN": Tu_col_base_kN,
         "column_weld_size_mm": column_weld_size_mm,
-        "L_col_weld_eff_mm": L_col_weld_eff_mm,
+        "column_weld_layout": column_weld_layout,
+        "column_weld_layout_used": weld_len_info["layout_used"],
+        "L_col_geom_mm": L_col_geom_mm,
+        "L_col_weld_eff_mm": L_col_eff_mm,
+        "beta_length": weld_len_info["beta_length"],
+        "l_over_w": weld_len_info["l_over_w"],
+        "min_length_ok": weld_len_info["min_length_ok"],
+        "excessive_length_limit_applied": weld_len_info["excessive_length_limit_applied"],
         "Aw_col_mm2": Aw_col_mm2,
         "phiRn_col_kN": phiRn_col_kN,
         "col_weld_ok": col_weld_ok,
         "col_weld_util": col_weld_util,
-        "use_auto_column_weld_length": use_auto_column_weld_length,
 
         "shear_key_required": module9_results["shear_key_required"],
         "Vu_lug_kN": Vu_lug_kN,
@@ -2188,16 +2306,24 @@ with st.sidebar.expander("Módulo 10 - soldadura", expanded=False):
     # ----------------------------------------------------
     # Soldadura columna - placa
     # ----------------------------------------------------
-    use_auto_column_weld_length = st.checkbox(
-        "Autoestimar longitud de soldadura columna-placa",
-        value=True
-    )
-
     column_weld_size_mm = st.number_input(
         "Tamaño filete columna-placa [mm]",
         min_value=0.0,
         value=8.0,
         step=1.0
+    )
+
+    column_weld_layout = st.selectbox(
+        "Disposición de soldadura columna-placa",
+        [
+            "auto_by_section",
+            "flanges_only",
+            "web_only",
+            "flanges_plus_web",
+            "all_perimeter_rect",
+            "manual"
+        ],
+        index=0
     )
 
     column_weld_length_manual_mm = st.number_input(
@@ -2508,8 +2634,8 @@ try:
             module9_results=module9_results,
             FEXX_MPa=FEXX_MPa,
             phi_weld=phi_weld,
-            use_auto_column_weld_length=use_auto_column_weld_length,
             column_weld_size_mm=column_weld_size_mm,
+            column_weld_layout=column_weld_layout,
             column_weld_length_manual_mm=column_weld_length_manual_mm,
             provide_shear_lug_weld=provide_shear_lug_weld,
             shear_lug_weld_size_mm=shear_lug_weld_size_mm,
@@ -3053,7 +3179,14 @@ try:
                 ["φ soldadura", f"{module10_results['phi_weld']:.3f}"],
                 ["Demanda Tu columna-base [kN]", f"{module10_results['Tu_col_base_kN']:.5f}"],
                 ["Tamaño filete [mm]", f"{module10_results['column_weld_size_mm']:.3f}"],
-                ["Longitud efectiva L [mm]", f"{module10_results['L_col_weld_eff_mm']:.3f}"],
+                ["Patrón solicitado", module10_results["column_weld_layout"]],
+                ["Patrón usado", module10_results["column_weld_layout_used"]],
+                ["Longitud geométrica [mm]", f"{module10_results['L_col_geom_mm']:.3f}"],
+                ["β por longitud", f"{module10_results['beta_length']:.5f}"],
+                ["l/w", f"{module10_results['l_over_w']:.3f}"],
+                ["Longitud mínima 4w cumple", "Sí" if module10_results["min_length_ok"] else "No"],
+                ["Reducción por longitud excesiva", "Sí" if module10_results["excessive_length_limit_applied"] else "No"],
+                ["Longitud efectiva L_eff [mm]", f"{module10_results['L_col_weld_eff_mm']:.3f}"],
                 ["Área efectiva Aw [mm²]", f"{module10_results['Aw_col_mm2']:.3f}"],
                 ["φRn soldadura columna-base [kN]", f"{module10_results['phiRn_col_kN']:.5f}"],
                 ["Utilización Tu/φRn", f"{module10_results['col_weld_util']:.5f}"],
@@ -3065,6 +3198,17 @@ try:
                 use_container_width=True,
                 hide_index=True,
             )
+            
+            if not module10_results["min_length_ok"]:
+                st.warning(
+                    "La longitud geométrica de soldadura es menor que 4 veces el tamaño del filete. "
+                    "AISC J2.2b(c) exige ajustar el tamaño efectivo o aumentar la longitud."
+                )
+
+            if module10_results["excessive_length_limit_applied"]:
+                st.warning(
+                    "Se aplicó reducción de longitud efectiva por filete excesivamente largo conforme a J2-1 / límite de longitud."
+                )
 
             if module10_results["col_weld_ok"]:
                 st.success("La soldadura columna-placa cumple en este modelo preliminar de filete concéntrico.")
