@@ -1888,6 +1888,170 @@ def module11_biaxial_preliminary(
         "bolt_tension_df": bolt_tension_df,
     }
 # ============================================================
+# MÓDULO 12 - REFINAMIENTO BIAxIAL POR MALLA
+# ============================================================
+
+def module12_biaxial_grid_refinement(
+    loads: Loads,
+    base_plate: BasePlateGeometry,
+    bolt_df: pd.DataFrame,
+    nx: int,
+    ny: int,
+    use_bolt_distribution: bool = True,
+) -> dict:
+    """
+    Módulo 12:
+    refinamiento biaxial mediante malla sobre la placa.
+
+    Modelo:
+    q(x,y) = P/A + (My/Iy)*x + (Mx/Ix)*y
+
+    Se separa:
+    - compresión: q_pos = max(q, 0)
+    - levantamiento elástico: q_neg = max(-q, 0)
+
+    Este módulo NO es todavía el equilibrio no lineal final,
+    pero mejora notablemente la evaluación preliminar biaxial.
+    """
+
+    B = base_plate.B_bp_mm
+    N = base_plate.N_bp_mm
+
+    A = B * N
+    Ix = B * N**3 / 12.0
+    Iy = N * B**3 / 12.0
+
+    Pu_N = loads.Pu_kN * 1_000.0
+    Mux_Nmm = loads.Mux_kNm * 1_000_000.0
+    Muy_Nmm = loads.Muy_kNm * 1_000_000.0
+
+    # --------------------------------------------------------
+    # Malla
+    # --------------------------------------------------------
+    x_vals = np.linspace(-B/2.0, B/2.0, int(nx))
+    y_vals = np.linspace(-N/2.0, N/2.0, int(ny))
+
+    dx = B / (int(nx) - 1)
+    dy = N / (int(ny) - 1)
+    dA = dx * dy
+
+    X, Y = np.meshgrid(x_vals, y_vals)
+
+    # --------------------------------------------------------
+    # Presión elástica biaxial
+    # --------------------------------------------------------
+    Q = (Pu_N / A) + (Muy_Nmm / Iy) * X + (Mux_Nmm / Ix) * Y
+
+    Qpos = np.maximum(Q, 0.0)
+    Qneg = np.maximum(-Q, 0.0)
+
+    q_max_MPa = float(np.max(Q))
+    q_min_MPa = float(np.min(Q))
+
+    full_compression = q_min_MPa >= 0.0
+    possible_uplift = q_min_MPa < 0.0
+
+    # --------------------------------------------------------
+    # Integración de compresión y levantamiento elástico
+    # --------------------------------------------------------
+    C_N = float(np.sum(Qpos) * dA)
+    T_equiv_N = float(np.sum(Qneg) * dA)
+
+    if C_N > 0:
+        xC_mm = float(np.sum(Qpos * X) * dA / C_N)
+        yC_mm = float(np.sum(Qpos * Y) * dA / C_N)
+    else:
+        xC_mm = 0.0
+        yC_mm = 0.0
+
+    # --------------------------------------------------------
+    # Tracción preliminar en pernos
+    # --------------------------------------------------------
+    bolt_tension_df = bolt_df.copy()
+    bolt_tension_df["uplift_index"] = 0.0
+    bolt_tension_df["T_refined_kN"] = 0.0
+
+    Tmax_refined_kN = 0.0
+    critical_bolt = None
+
+    if possible_uplift and use_bolt_distribution:
+        # Índice de levantamiento en pernos usando la misma ley elástica
+        q_bolts = (
+            (Pu_N / A)
+            + (Muy_Nmm / Iy) * bolt_tension_df["x_mm"].to_numpy()
+            + (Mux_Nmm / Ix) * bolt_tension_df["y_mm"].to_numpy()
+        )
+
+        uplift_index = np.maximum(-q_bolts, 0.0)
+
+        # Si por discretización sale todo cero pero sí hay uplift, se usa fallback
+        if np.sum(uplift_index) <= 0:
+            fallback = (
+                (Muy_Nmm / Iy) * bolt_tension_df["x_mm"].to_numpy()
+                + (Mux_Nmm / Ix) * bolt_tension_df["y_mm"].to_numpy()
+            )
+            fallback = fallback - np.min(fallback)
+            uplift_index = np.maximum(fallback, 0.0)
+
+        bolt_tension_df["uplift_index"] = uplift_index
+
+        total_index = float(np.sum(uplift_index))
+
+        if total_index > 0 and T_equiv_N > 0:
+            bolt_tension_df["T_refined_kN"] = (
+                T_equiv_N * uplift_index / total_index / 1_000.0
+            )
+        else:
+            bolt_tension_df["T_refined_kN"] = 0.0
+
+        Tmax_refined_kN = float(bolt_tension_df["T_refined_kN"].max())
+
+        if Tmax_refined_kN > 0:
+            critical_bolt_row = bolt_tension_df.loc[bolt_tension_df["T_refined_kN"].idxmax()]
+            critical_bolt = int(critical_bolt_row["Perno"])
+
+    # --------------------------------------------------------
+    # Momentos internos aproximados
+    # --------------------------------------------------------
+    T_i_N = bolt_tension_df["T_refined_kN"].to_numpy() * 1_000.0
+    x_i = bolt_tension_df["x_mm"].to_numpy()
+    y_i = bolt_tension_df["y_mm"].to_numpy()
+
+    # Convención:
+    # Mx por brazo en y
+    # My por brazo en x
+    Mx_internal_Nmm = C_N * yC_mm - np.sum(T_i_N * y_i)
+    My_internal_Nmm = C_N * xC_mm - np.sum(T_i_N * x_i)
+
+    Mx_residual_kNm = loads.Mux_kNm - Mx_internal_Nmm / 1_000_000.0
+    My_residual_kNm = loads.Muy_kNm - My_internal_Nmm / 1_000_000.0
+
+    return {
+        "A_mm2": A,
+        "Ix_mm4": Ix,
+        "Iy_mm4": Iy,
+        "nx": int(nx),
+        "ny": int(ny),
+        "dx_mm": dx,
+        "dy_mm": dy,
+        "dA_mm2": dA,
+        "q_max_MPa": q_max_MPa,
+        "q_min_MPa": q_min_MPa,
+        "full_compression": full_compression,
+        "possible_uplift": possible_uplift,
+        "C_kN": C_N / 1_000.0,
+        "T_equiv_kN": T_equiv_N / 1_000.0,
+        "xC_mm": xC_mm,
+        "yC_mm": yC_mm,
+        "Mx_internal_kNm": Mx_internal_Nmm / 1_000_000.0,
+        "My_internal_kNm": My_internal_Nmm / 1_000_000.0,
+        "Mx_residual_kNm": Mx_residual_kNm,
+        "My_residual_kNm": My_residual_kNm,
+        "critical_bolt": critical_bolt,
+        "Tmax_refined_kN": Tmax_refined_kN,
+        "bolt_tension_df": bolt_tension_df,
+    }
+# ============================================================
 # FUNCIONES DE GRÁFICO
 # ============================================================
 
@@ -2354,6 +2518,28 @@ with st.sidebar.expander("Módulo 10 - soldadura", expanded=False):
         value=200.0,
         step=10.0
     )
+
+with st.sidebar.expander("Módulo 12 - refinamiento biaxial", expanded=False):
+    biaxial_grid_nx = st.number_input(
+        "Número de divisiones en x",
+        min_value=11,
+        max_value=201,
+        value=41,
+        step=2
+    )
+
+    biaxial_grid_ny = st.number_input(
+        "Número de divisiones en y",
+        min_value=11,
+        max_value=201,
+        value=41,
+        step=2
+    )
+
+    biaxial_use_bolt_uplift_distribution = st.checkbox(
+        "Distribuir tracción biaxial preliminar en pernos",
+        value=True
+    )
 with st.sidebar.expander("Pedestal", expanded=True):
     B_ped_mm = st.number_input("B pedestal [mm]", min_value=0.001, value=900.0)
     N_ped_mm = st.number_input("N pedestal [mm]", min_value=0.001, value=900.0)
@@ -2655,9 +2841,23 @@ try:
     else:
         module11_results = None
     # --------------------------------------------------------
+    # MÓDULO 12
+    # --------------------------------------------------------
+    if analysis_mode == "Biaxial":
+        module12_results = module12_biaxial_grid_refinement(
+            loads=loads,
+            base_plate=base_plate,
+            bolt_df=bolt_df,
+            nx=biaxial_grid_nx,
+            ny=biaxial_grid_ny,
+            use_bolt_distribution=biaxial_use_bolt_uplift_distribution,
+        )
+    else:
+        module12_results = None
+    # --------------------------------------------------------
     # PESTAÑAS
     # --------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15 = st.tabs([
     "Datos y geometría",
     "Módulo 1 - Uniaxial",
     "Módulo 2 - Compresión",
@@ -2669,7 +2869,8 @@ try:
     "Módulo 8 - ACI 17.9",
     "Módulo 9 - Cortante base",
     "Módulo 10 - Soldadura",
-    "Módulo 11 - Biaxial",
+    "Módulo 11 - Biaxial preliminar",
+    "Módulo 12 - Biaxial refinado",
     "Resumen",
     "Estado",
     ])
@@ -3309,18 +3510,64 @@ try:
                 )
             else:
                 st.success("En esta evaluación preliminar biaxial, toda la placa permanece en compresión.")
+   
     with tab13:
-        st.subheader("Resumen")
-        st.write("Aquí puedes ir consolidando después un resumen global de chequeos.")
+        st.subheader("Módulo 12 - refinamiento biaxial por malla")
 
+        if analysis_mode != "Biaxial":
+            st.info("En la barra lateral elegiste modo Uniaxial. Cambia a Biaxial para activar este módulo.")
+        else:
+            mod12_rows = [
+                ["nx", f"{module12_results['nx']}"],
+                ["ny", f"{module12_results['ny']}"],
+                ["dx [mm]", f"{module12_results['dx_mm']:.3f}"],
+                ["dy [mm]", f"{module12_results['dy_mm']:.3f}"],
+                ["dA [mm²]", f"{module12_results['dA_mm2']:.3f}"],
+                ["q_max [MPa]", f"{module12_results['q_max_MPa']:.5f}"],
+                ["q_min [MPa]", f"{module12_results['q_min_MPa']:.5f}"],
+                ["Compresión total", "Sí" if module12_results["full_compression"] else "No"],
+                ["Posible levantamiento", "Sí" if module12_results["possible_uplift"] else "No"],
+                ["C total [kN]", f"{module12_results['C_kN']:.5f}"],
+                ["T equivalente [kN]", f"{module12_results['T_equiv_kN']:.5f}"],
+                ["xC [mm]", f"{module12_results['xC_mm']:.5f}"],
+                ["yC [mm]", f"{module12_results['yC_mm']:.5f}"],
+                ["Mx interno [kN·m]", f"{module12_results['Mx_internal_kNm']:.5f}"],
+                ["My interno [kN·m]", f"{module12_results['My_internal_kNm']:.5f}"],
+                ["Residual Mx [kN·m]", f"{module12_results['Mx_residual_kNm']:.5f}"],
+                ["Residual My [kN·m]", f"{module12_results['My_residual_kNm']:.5f}"],
+                ["Perno crítico refinado", "-" if module12_results["critical_bolt"] is None else str(module12_results["critical_bolt"])],
+                ["Tracción máxima refinada por perno [kN]", f"{module12_results['Tmax_refined_kN']:.5f}"],
+            ]
+
+            st.dataframe(
+                pd.DataFrame(mod12_rows, columns=["Parámetro", "Valor"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.markdown("### Tracción refinada en pernos")
+            st.dataframe(
+                module12_results["bolt_tension_df"][["Perno", "x_mm", "y_mm", "uplift_index", "T_refined_kN"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.warning(
+                "Este módulo mejora la rama biaxial usando integración por malla y separación entre zonas comprimidas y levantadas. "
+                "Aun así, no representa todavía la solución final exacta con equilibrio no lineal completo."
+            )   
     with tab14:
+        st.subheader("Resumen")
+        st.write("Aquí puedes consolidar después un resumen global de chequeos uniaxiales y biaxiales.")
+
+    with tab15:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
-        st.write("- Base geométrica")
-        st.write("- Módulos 1 a 10 en rama uniaxial")
-        st.write("- Módulo 11 biaxial preliminar")
+        st.write("- Rama uniaxial: Módulos 1 a 10")
+        st.write("- Rama biaxial preliminar: Módulo 11")
+        st.write("- Rama biaxial refinada por malla: Módulo 12")
         st.write("**Siguiente módulo recomendado:**")
-        st.write("- Refinamiento biaxial: equilibrio no lineal de compresión + tracción en pernos")
+        st.write("- Módulo 13: cierre de diseño y reporte global")
 
 except Exception as exc:
     st.error(f"Error en los datos de entrada: {exc}")
