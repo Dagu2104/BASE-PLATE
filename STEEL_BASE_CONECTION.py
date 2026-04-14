@@ -430,6 +430,122 @@ def module2_uniaxial_bearing(
     return results
 
 # ============================================================
+# MÓDULO 3 - TRACCIÓN UNIAXIAL EN PERNOS
+# ============================================================
+
+def module3_uniaxial_anchor_tension(
+    loads: Loads,
+    base_plate: BasePlateGeometry,
+    anchors: AnchorLayout,
+    bolt_df: pd.DataFrame,
+    module2_results: dict,
+) -> dict:
+    """
+    Módulo 3:
+    cálculo preliminar de tracción en pernos para análisis uniaxial.
+
+    Hipótesis:
+    - si no hay levantamiento, T = 0
+    - si hay compresión parcial, el momento lo equilibran:
+        * compresión en concreto
+        * tracción en la fila extrema de pernos del lado traccionado
+    - la tracción total se reparte uniformemente entre los pernos
+      de la fila extrema traccionada
+
+    Convención:
+    - axis = 'x' -> flexión asociada a Mux, variación sobre eje y
+    - axis = 'y' -> flexión asociada a Muy, variación sobre eje x
+    """
+
+    axis = module2_results["axis"]
+    Pu_N = loads.Pu_kN * 1_000.0
+
+    if axis == "x":
+        Mu_Nmm = loads.Mux_kNm * 1_000_000.0
+        coord_name = "y_mm"
+        extreme_coord = bolt_df["y_mm"].abs().max()
+    elif axis == "y":
+        Mu_Nmm = loads.Muy_kNm * 1_000_000.0
+        coord_name = "x_mm"
+        extreme_coord = bolt_df["x_mm"].abs().max()
+    else:
+        raise ValueError("El eje del Módulo 3 debe ser 'x' o 'y'.")
+
+    # Si no hay compresión parcial, no se activa la tracción en este modelo
+    if module2_results["case"] == "full_compression":
+        return {
+            "axis": axis,
+            "case": "full_compression",
+            "tension_active": False,
+            "T_total_kN": 0.0,
+            "n_tension_bolts": 0,
+            "T_per_bolt_kN": 0.0,
+            "lever_arm_mm": 0.0,
+            "tension_side": "No aplica",
+            "critical_bolts": [],
+        }
+
+    # --------------------------------------------------------
+    # Lado traccionado
+    # --------------------------------------------------------
+    # Si e > 0, la compresión se va hacia el lado positivo.
+    # La tracción aparece en el lado opuesto.
+    e_mm = module2_results["e_mm"]
+
+    if e_mm >= 0:
+        tension_side = "negative"
+        tension_coord = -extreme_coord
+    else:
+        tension_side = "positive"
+        tension_coord = extreme_coord
+
+    # Pernos activos en tracción = fila extrema del lado que levanta
+    tol = 1e-6
+    tension_bolts_df = bolt_df[np.isclose(bolt_df[coord_name], tension_coord, atol=tol)].copy()
+
+    n_tension_bolts = len(tension_bolts_df)
+
+    if n_tension_bolts == 0:
+        raise ValueError("No se identificaron pernos en la fila extrema traccionada.")
+
+    # --------------------------------------------------------
+    # Brazo entre C y T
+    # --------------------------------------------------------
+    xC_from_center_mm = module2_results["xC_from_center_mm"]
+    lever_arm_mm = abs(tension_coord - xC_from_center_mm)
+
+    if lever_arm_mm <= 0:
+        raise ValueError("El brazo interno entre compresión y tracción no es positivo.")
+
+    # --------------------------------------------------------
+    # Equilibrio de momentos
+    # M = C*zC + T*zT
+    # pero C = Pu + T  si tomamos equilibrio vertical con compresión positiva
+    #
+    # Para esta etapa preliminar, se usa equilibrio directo del par interno:
+    # T_total = Mu / z
+    #
+    # Esto es una aproximación preliminar razonable para depuración
+    # antes del refinamiento completo.
+    # --------------------------------------------------------
+    T_total_N = abs(Mu_Nmm) / lever_arm_mm
+    T_per_bolt_N = T_total_N / n_tension_bolts
+
+    critical_bolts = tension_bolts_df["Perno"].astype(int).tolist()
+
+    return {
+        "axis": axis,
+        "case": "partial_compression",
+        "tension_active": True,
+        "T_total_kN": T_total_N / 1_000.0,
+        "n_tension_bolts": n_tension_bolts,
+        "T_per_bolt_kN": T_per_bolt_N / 1_000.0,
+        "lever_arm_mm": lever_arm_mm,
+        "tension_side": tension_side,
+        "critical_bolts": critical_bolts,
+        "tension_coord_mm": tension_coord,
+    }
+# ============================================================
 # FUNCIONES DE GRÁFICO
 # ============================================================
 
@@ -747,17 +863,32 @@ try:
         )
     else:
         module2_results = None
-        
+
+    # --------------------------------------------------------
+    # MÓDULO 3
+    # --------------------------------------------------------
+    if analysis_mode == "Uniaxial":
+        module3_results = module3_uniaxial_anchor_tension(
+            loads=loads,
+            base_plate=base_plate,
+            anchors=anchors,
+            bolt_df=bolt_df,
+            module2_results=module2_results,
+        )
+    else:
+        module3_results = None   
+
     # --------------------------------------------------------
     # PESTAÑAS
     # --------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Datos y geometría",
     "Módulo 1 - Uniaxial",
     "Módulo 2 - Compresión",
+    "Módulo 3 - Pernos",
     "Biaxial",
     "Resumen",
-    ])
+])
 
     with tab1:
         st.subheader("Resumen de datos de entrada")
@@ -893,13 +1024,59 @@ try:
                     "El chequeo preliminar de bearing con q_max ≤ φ·0.85·f'c no cumple."
                 )    
 
+    
     with tab4:
+        st.subheader("Módulo 3 - tracción uniaxial en pernos")
+
+        if analysis_mode != "Uniaxial":
+            st.info("En la barra lateral elegiste modo Biaxial. Cambia a Uniaxial para activar este módulo.")
+        else:
+            mod3_df = pd.DataFrame({
+                "Parámetro": [
+                    "Eje analizado",
+                    "Caso de compresión",
+                    "Tracción activa en pernos",
+                    "Lado traccionado",
+                    "Brazo interno C-T [mm]",
+                    "Número de pernos traccionados",
+                    "Tracción total T [kN]",
+                    "Tracción por perno [kN]",
+                    "Fila extrema de pernos [coord. mm]",
+                    "Pernos críticos",
+                ],
+                "Valor": [
+                    module3_results["axis"],
+                    "Compresión total" if module3_results["case"] == "full_compression" else "Compresión parcial",
+                    "Sí" if module3_results["tension_active"] else "No",
+                    module3_results["tension_side"],
+                    f"{module3_results['lever_arm_mm']:.3f}",
+                    f"{module3_results['n_tension_bolts']}",
+                    f"{module3_results['T_total_kN']:.5f}",
+                    f"{module3_results['T_per_bolt_kN']:.5f}",
+                    f"{module3_results.get('tension_coord_mm', 0.0):.3f}",
+                    str(module3_results["critical_bolts"]),
+                ],
+            })
+            st.dataframe(mod3_df, use_container_width=True, hide_index=True)
+
+            if not module3_results["tension_active"]:
+                st.success(
+                    "En este modelo preliminar uniaxial no se activa tracción en pernos."
+                )
+            else:
+                st.warning(
+                    "Se activa tracción en la fila extrema de pernos del lado que levanta. "
+                    "El siguiente módulo verificará el espesor de placa."
+                )
+    
+
+    with tab5:
         st.subheader("Modo biaxial")
         st.info(
             "Aquí irá el módulo biaxial una vez que cerremos y depuremos bien el flujo uniaxial."
         )
 
-    with tab5:
+    with tab6:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
         st.write("- Base geométrica")
