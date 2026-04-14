@@ -764,6 +764,222 @@ def module5_anchor_steel_strength(
     }
 
 # ============================================================
+# MÓDULO 6 - CONCRETO EN TENSIÓN (ACI 318-25)
+# ============================================================
+
+def module6_concrete_tension(
+    materials: Materials,
+    anchors: AnchorLayout,
+    pedestal: PedestalGeometry,
+    bolt_df: pd.DataFrame,
+    module3_results: dict,
+    anchor_type: str,
+    anchor_installation: str,
+    service_cracked: bool,
+    lambda_a: float,
+    psi_a: float,
+    phi_concrete_tension: float,
+    Abrg_mm2: float,
+    eh_mm: float,
+    ca1_x_mm: float,
+    ca1_y_mm: float,
+    ca2_mm: float,
+) -> dict:
+    """
+    Módulo 6:
+    revisión de anclaje al concreto en tensión.
+
+    Alcance actual:
+    - concrete breakout en tensión
+    - pullout
+    - side-face blowout
+    - interacción de comparación contra la demanda de tensión del Módulo 3
+
+    Validez práctica actual:
+    - módulo pensado primero para grupos sin borde cercano crítico
+    - no incluye todavía todos los modificadores completos de 17.6.2.3 a 17.6.2.5
+    - no incluye bond de adhesive anchors
+    - no incluye aún cortante de concreto ni pryout
+    """
+
+    # --------------------------------------------------------
+    # Demanda de tensión del grupo y del perno crítico
+    # --------------------------------------------------------
+    if not module3_results["tension_active"]:
+        Nua_per_bolt_N = 0.0
+        Nua_group_N = 0.0
+    else:
+        Nua_per_bolt_N = module3_results["T_per_bolt_kN"] * 1_000.0
+        Nua_group_N = module3_results["T_total_kN"] * 1_000.0
+
+    hef_mm = anchors.hef_mm
+    da_mm = anchors.db_mm
+    fc_MPa = materials.fc_MPa
+
+    # --------------------------------------------------------
+    # k_c para concrete breakout
+    # --------------------------------------------------------
+    if anchor_installation == "cast_in":
+        kc = 10.0
+    elif anchor_installation == "post_installed":
+        kc = 7.0
+    else:
+        raise ValueError("anchor_installation debe ser 'cast_in' o 'post_installed'.")
+
+    # --------------------------------------------------------
+    # A_Nco = 9 hef^2
+    # --------------------------------------------------------
+    ANco_mm2 = 9.0 * hef_mm**2
+
+    # --------------------------------------------------------
+    # A_Nc aproximado del grupo sin borde crítico
+    # proyección simplificada rectangular:
+    # (rango x del grupo + 3hef) * (rango y del grupo + 3hef)
+    # esto equivale a extender 1.5hef por cada lado
+    # --------------------------------------------------------
+    x_min = bolt_df["x_mm"].min()
+    x_max = bolt_df["x_mm"].max()
+    y_min = bolt_df["y_mm"].min()
+    y_max = bolt_df["y_mm"].max()
+
+    span_x = x_max - x_min
+    span_y = y_max - y_min
+
+    ANc_mm2 = (span_x + 3.0 * hef_mm) * (span_y + 3.0 * hef_mm)
+
+    # --------------------------------------------------------
+    # Verificación simple de borde para uso del módulo
+    # Si el borde disponible es menor que 1.5hef, advertimos que
+    # el módulo está fuera de su rango ideal actual.
+    # --------------------------------------------------------
+    edge_ok_x = ca1_x_mm >= 1.5 * hef_mm
+    edge_ok_y = ca1_y_mm >= 1.5 * hef_mm
+    no_edge_effect_assumption_ok = edge_ok_x and edge_ok_y
+
+    # --------------------------------------------------------
+    # Concrete breakout básico
+    # Nb = kc * lambda_a * sqrt(fc') * hef^1.5
+    # --------------------------------------------------------
+    Nb_N = kc * lambda_a * math.sqrt(fc_MPa) * (hef_mm ** 1.5)
+
+    # Como versión inicial:
+    # psi_ec,N = 1.0
+    # psi_ed,N = 1.0
+    # psi_c,N  = 1.0 (conservador para región agrietada)
+    # psi_cp,N = 1.0
+    psi_ec_N = 1.0
+    psi_ed_N = 1.0
+    psi_cp_N = 1.0
+    psi_c_N = 1.0
+
+    Ncbg_N = (ANc_mm2 / ANco_mm2) * psi_ec_N * psi_ed_N * psi_c_N * psi_cp_N * Nb_N
+    phiNcbg_N = phi_concrete_tension * Ncbg_N
+
+    # --------------------------------------------------------
+    # Pullout
+    # --------------------------------------------------------
+    psi_c_P = 1.0 if service_cracked else 1.4
+
+    Npn_N = None
+
+    if anchor_type in ["headed_bolt", "headed_stud"] and anchor_installation == "cast_in":
+        Np_N = 8.0 * Abrg_mm2 * fc_MPa
+        Npn_N = psi_c_P * Np_N
+
+    elif anchor_type == "hooked_bolt" and anchor_installation == "cast_in":
+        if eh_mm < 3.0 * da_mm or eh_mm > 4.5 * da_mm:
+            raise ValueError(
+                f"Para hooked bolts, ACI 17.6.3.2.2(b) requiere 3da ≤ eh ≤ 4.5da. "
+                f"Actualmente: eh={eh_mm:.3f} mm, da={da_mm:.3f} mm."
+            )
+        Np_N = 0.9 * fc_MPa * eh_mm * da_mm
+        Npn_N = psi_c_P * Np_N
+
+    elif anchor_type == "adhesive_anchor":
+        # bond strength no se puede cerrar aquí sin datos del sistema/calificación
+        Npn_N = None
+
+    else:
+        # Para post-installed expansion/screw/undercut, ACI exige valores por ensayo/calificación
+        Npn_N = None
+
+    phiNpn_N = phi_concrete_tension * Npn_N if Npn_N is not None else None
+
+    # --------------------------------------------------------
+    # Side-face blowout
+    # Solo headed anchors
+    # --------------------------------------------------------
+    Nsbg_N = None
+    phiNsbg_N = None
+
+    if anchor_type in ["headed_bolt", "headed_stud"]:
+        # Tomamos ca1 mínimo como el más desfavorable entre x e y
+        ca1_mm = min(ca1_x_mm, ca1_y_mm)
+
+        Nsb_single_N = psi_a * 13.0 * ca1_mm * math.sqrt(Abrg_mm2) * lambda_a * math.sqrt(fc_MPa)
+
+        if ca2_mm < 3.0 * ca1_mm:
+            ratio = ca2_mm / ca1_mm
+            if ratio < 1.0:
+                ratio = 1.0
+            Nsb_single_N *= (1.0 + ratio) / 4.0
+
+        # grupo: aproximación lineal conservadora con anclajes en tracción
+        if module3_results["tension_active"]:
+            n_tension = module3_results["n_tension_bolts"]
+        else:
+            n_tension = 0
+
+        Nsbg_N = Nsb_single_N * max(n_tension, 1)
+        phiNsbg_N = phi_concrete_tension * Nsbg_N
+
+    # --------------------------------------------------------
+    # Resistencia concreta gobernante en tensión
+    # Para este módulo:
+    # min(concrete breakout, pullout si aplica, side-face blowout si aplica)
+    # --------------------------------------------------------
+    resistance_candidates = [phiNcbg_N]
+
+    if phiNpn_N is not None:
+        resistance_candidates.append(phiNpn_N)
+
+    if phiNsbg_N is not None:
+        resistance_candidates.append(phiNsbg_N)
+
+    phiNn_cg_N = min(resistance_candidates)
+
+    concrete_tension_ok = Nua_group_N <= phiNn_cg_N
+
+    return {
+        "kc": kc,
+        "lambda_a": lambda_a,
+        "psi_a": psi_a,
+        "phi_concrete_tension": phi_concrete_tension,
+        "hef_mm": hef_mm,
+        "da_mm": da_mm,
+        "fc_MPa": fc_MPa,
+        "ANco_mm2": ANco_mm2,
+        "ANc_mm2": ANc_mm2,
+        "edge_ok_x": edge_ok_x,
+        "edge_ok_y": edge_ok_y,
+        "no_edge_effect_assumption_ok": no_edge_effect_assumption_ok,
+        "Nb_kN": Nb_N / 1_000.0,
+        "Ncbg_kN": Ncbg_N / 1_000.0,
+        "phiNcbg_kN": phiNcbg_N / 1_000.0,
+        "psi_c_P": psi_c_P,
+        "Npn_kN": None if Npn_N is None else Npn_N / 1_000.0,
+        "phiNpn_kN": None if phiNpn_N is None else phiNpn_N / 1_000.0,
+        "Nsbg_kN": None if Nsbg_N is None else Nsbg_N / 1_000.0,
+        "phiNsbg_kN": None if phiNsbg_N is None else phiNsbg_N / 1_000.0,
+        "Nua_per_bolt_kN": Nua_per_bolt_N / 1_000.0,
+        "Nua_group_kN": Nua_group_N / 1_000.0,
+        "phiNn_cg_kN": phiNn_cg_N / 1_000.0,
+        "concrete_tension_ok": concrete_tension_ok,
+        "anchor_type": anchor_type,
+        "anchor_installation": anchor_installation,
+    }
+
+# ============================================================
 # FUNCIONES DE GRÁFICO
 # ============================================================
 
@@ -973,6 +1189,80 @@ with st.sidebar.expander("Módulo 5 - acero del anclaje", expanded=False):
         step=0.01
     )
 
+with st.sidebar.expander("Módulo 6 - concreto en tensión", expanded=False):
+    anchor_installation = st.selectbox(
+        "Instalación del anclaje",
+        ["cast_in", "post_installed"],
+        index=0
+    )
+
+    service_cracked = st.checkbox(
+        "¿La región está agrietada a nivel de servicio?",
+        value=True
+    )
+
+    lambda_a = st.number_input(
+        "λa",
+        min_value=0.10,
+        max_value=2.00,
+        value=1.00,
+        step=0.05
+    )
+
+    psi_a = st.number_input(
+        "ψa",
+        min_value=0.10,
+        max_value=2.00,
+        value=1.00,
+        step=0.05
+    )
+
+    phi_concrete_tension = st.number_input(
+        "φ concreto en tensión",
+        min_value=0.01,
+        max_value=1.00,
+        value=0.70,
+        step=0.01
+    )
+
+    # Para headed bolts / headed studs
+    Abrg_mm2 = st.number_input(
+        "Abrg [mm²] (área neta de apoyo de cabeza)",
+        min_value=0.001,
+        value=800.0,
+        step=10.0
+    )
+
+    # Para hooked bolts
+    eh_mm = st.number_input(
+        "eh [mm] (solo J/L bolt)",
+        min_value=0.0,
+        value=0.0,
+        step=5.0
+    )
+
+    # Distancias a borde del grupo respecto al pedestal
+    ca1_x_mm = st.number_input(
+        "ca1,x [mm] (borde mínimo en x)",
+        min_value=0.001,
+        value=250.0,
+        step=5.0
+    )
+
+    ca1_y_mm = st.number_input(
+        "ca1,y [mm] (borde mínimo en y)",
+        min_value=0.001,
+        value=250.0,
+        step=5.0
+    )
+
+    ca2_mm = st.number_input(
+        "ca2 [mm] (borde perpendicular para side-face blowout)",
+        min_value=0.001,
+        value=300.0,
+        step=5.0
+    )
+
 with st.sidebar.expander("Pedestal", expanded=True):
     B_ped_mm = st.number_input("B pedestal [mm]", min_value=0.001, value=900.0)
     N_ped_mm = st.number_input("N pedestal [mm]", min_value=0.001, value=900.0)
@@ -1158,15 +1448,40 @@ try:
         module5_results = None
 
     # --------------------------------------------------------
+    # MÓDULO 6
+    # --------------------------------------------------------
+    if analysis_mode == "Uniaxial":
+        module6_results = module6_concrete_tension(
+            materials=materials,
+            anchors=anchors,
+            pedestal=pedestal,
+            bolt_df=bolt_df,
+            module3_results=module3_results,
+            anchor_type=anchor_type,
+            anchor_installation=anchor_installation,
+            service_cracked=service_cracked,
+            lambda_a=lambda_a,
+            psi_a=psi_a,
+            phi_concrete_tension=phi_concrete_tension,
+            Abrg_mm2=Abrg_mm2,
+            eh_mm=eh_mm,
+            ca1_x_mm=ca1_x_mm,
+            ca1_y_mm=ca1_y_mm,
+            ca2_mm=ca2_mm,
+        )
+    else:
+        module6_results = None
+    # --------------------------------------------------------
     # PESTAÑAS
     # --------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "Datos y geometría",
     "Módulo 1 - Uniaxial",
     "Módulo 2 - Compresión",
     "Módulo 3 - Pernos",
     "Módulo 4 - Espesor",
     "Módulo 5 - Acero anclaje",
+    "Módulo 6 - Concreto tensión",
     "Biaxial",
     "Resumen",
     ])
@@ -1464,12 +1779,66 @@ try:
                 st.error("El acero del anclaje no cumple preliminarmente. Revisa diámetro, área o cantidad de pernos.")
 
     with tab7:
+        st.subheader("Módulo 6 - anclaje al concreto en tensión")
+
+        if analysis_mode != "Uniaxial":
+            st.info("En la barra lateral elegiste modo Biaxial. Cambia a Uniaxial para activar este módulo.")
+        else:
+            mod6_rows = [
+                ["Tipo de anclaje", module6_results["anchor_type"]],
+                ["Instalación", module6_results["anchor_installation"]],
+                ["f'c [MPa]", f"{module6_results['fc_MPa']:.3f}"],
+                ["hef [mm]", f"{module6_results['hef_mm']:.3f}"],
+                ["da [mm]", f"{module6_results['da_mm']:.3f}"],
+                ["kc", f"{module6_results['kc']:.3f}"],
+                ["λa", f"{module6_results['lambda_a']:.3f}"],
+                ["ψa", f"{module6_results['psi_a']:.3f}"],
+                ["A_Nco [mm²]", f"{module6_results['ANco_mm2']:.3f}"],
+                ["A_Nc [mm²]", f"{module6_results['ANc_mm2']:.3f}"],
+                ["Edge OK en x (ca1 ≥ 1.5hef)", "Sí" if module6_results["edge_ok_x"] else "No"],
+                ["Edge OK en y (ca1 ≥ 1.5hef)", "Sí" if module6_results["edge_ok_y"] else "No"],
+                ["Supuesto sin borde crítico válido", "Sí" if module6_results["no_edge_effect_assumption_ok"] else "No"],
+                ["Nb básico [kN]", f"{module6_results['Nb_kN']:.5f}"],
+                ["Ncbg [kN]", f"{module6_results['Ncbg_kN']:.5f}"],
+                ["φNcbg [kN]", f"{module6_results['phiNcbg_kN']:.5f}"],
+                ["ψc,P", f"{module6_results['psi_c_P']:.3f}"],
+                ["Npn [kN]", "-" if module6_results["Npn_kN"] is None else f"{module6_results['Npn_kN']:.5f}"],
+                ["φNpn [kN]", "-" if module6_results["phiNpn_kN"] is None else f"{module6_results['phiNpn_kN']:.5f}"],
+                ["Nsbg [kN]", "-" if module6_results["Nsbg_kN"] is None else f"{module6_results['Nsbg_kN']:.5f}"],
+                ["φNsbg [kN]", "-" if module6_results["phiNsbg_kN"] is None else f"{module6_results['phiNsbg_kN']:.5f}"],
+                ["Nua grupo [kN]", f"{module6_results['Nua_group_kN']:.5f}"],
+                ["Resistencia gobernante φNn,cg [kN]", f"{module6_results['phiNn_cg_kN']:.5f}"],
+                ["Chequeo concreto en tensión", "Cumple" if module6_results["concrete_tension_ok"] else "No cumple"],
+            ]
+
+            mod6_df = pd.DataFrame(mod6_rows, columns=["Parámetro", "Valor"])
+            st.dataframe(mod6_df, use_container_width=True, hide_index=True)
+
+            if not module6_results["no_edge_effect_assumption_ok"]:
+                st.warning(
+                    "Este Módulo 6 todavía está depurado para grupos sin borde crítico cercano. "
+                    "Tus distancias a borde son menores que 1.5hef en al menos una dirección, así que "
+                    "el resultado puede no ser representativo hasta que integremos los modificadores completos de borde."
+                )
+
+            if module6_results["anchor_type"] == "adhesive_anchor":
+                st.warning(
+                    "Para adhesive anchors, este módulo aún no calcula bond strength de 17.6.5. "
+                    "Por ahora solo sirve como estructura de trabajo."
+                )
+
+            if module6_results["concrete_tension_ok"]:
+                st.success("El anclaje al concreto cumple preliminarmente en tensión para los modos incluidos.")
+            else:
+                st.error("El anclaje al concreto no cumple preliminarmente en tensión para los modos incluidos.")
+
+    with tab8:
         st.subheader("Modo biaxial")
         st.info(
             "Aquí irá el módulo biaxial una vez que cerremos y depuremos bien el flujo uniaxial."
         )
 
-    with tab8:
+    with tab9:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
         st.write("- Base geométrica")
@@ -1478,8 +1847,9 @@ try:
         st.write("- Módulo 3 tracción preliminar en pernos")
         st.write("- Módulo 4 espesor de placa")
         st.write("- Módulo 5 acero del anclaje")
+        st.write("- Módulo 6 concreto en tensión (ACI 17 parcial)")
         st.write("**Siguiente módulo a integrar:**")
-        st.write("- Módulo 6: anclaje al concreto con ACI 318-25 Capítulo 17")
+        st.write("- Módulo 7: concreto en cortante (breakout en shear + pryout) e interacción concreta")
 
 except Exception as exc:
     st.error(f"Error en los datos de entrada: {exc}")
