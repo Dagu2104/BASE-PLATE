@@ -1328,6 +1328,196 @@ def module8_geometry_minimums_aci_17_9(
         "product_specific_min_spacing_mm": product_specific_min_spacing_mm,
         "tests_permit_greater_hef": tests_permit_greater_hef,
     }
+
+# ============================================================
+# MÓDULO 9 - TRANSFERENCIA DE CORTANTE EN LA BASE
+# VERSIÓN CORREGIDA CON DETECCIÓN AUTOMÁTICA DE SHEAR KEY
+# ============================================================
+
+def module9_base_shear_transfer(
+    loads: Loads,
+    module5_results: dict,
+    analysis_mode: str,
+    uniaxial_axis: str,
+    base_shear_mode: str,
+    base_shear_mechanism: str,
+    mu: float,
+    phi_base_friction: float,
+    phiVn_shear_key_external_kN: float,
+    allow_combined_mechanisms: bool,
+) -> dict:
+    """
+    Módulo 9:
+    transferencia de cortante en la base.
+
+    Modos:
+    - auto_detect:
+        revisa fricción, anclajes y combinación permitida;
+        si no alcanza, concluye que se requiere shear key.
+    - manual:
+        usa el mecanismo elegido por el usuario.
+
+    Alcance:
+    - la shear key entra aquí como necesidad detectada o como
+      resistencia ya conocida externamente
+    - este módulo NO diseña todavía el acero ni la soldadura del lug
+    """
+
+    if analysis_mode != "Uniaxial":
+        return None
+
+    # --------------------------------------------------------
+    # Cortante demandado
+    # --------------------------------------------------------
+    if uniaxial_axis == "x":
+        Vu_kN = abs(loads.Vux_kN)
+    elif uniaxial_axis == "y":
+        Vu_kN = abs(loads.Vuy_kN)
+    else:
+        raise ValueError("El eje uniaxial debe ser 'x' o 'y'.")
+
+    # --------------------------------------------------------
+    # Resistencias disponibles
+    # --------------------------------------------------------
+    Pu_comp_kN = max(loads.Pu_kN, 0.0)
+    phiVn_friction_kN = phi_base_friction * mu * Pu_comp_kN
+    phiVn_anchor_group_kN = module5_results["phiVsa_kN"] * module5_results["total_bolts"]
+    phiVn_shear_key_kN = phiVn_shear_key_external_kN
+
+    mechanism_warning = None
+    selected_case = None
+    contributing_mechanisms = []
+    phiVn_selected_kN = 0.0
+    shear_key_required = False
+    Vu_remaining_for_key_kN = 0.0
+
+    # --------------------------------------------------------
+    # MODO AUTOMÁTICO
+    # --------------------------------------------------------
+    if base_shear_mode == "auto_detect":
+
+        # 1) Fricción sola
+        if Vu_kN <= phiVn_friction_kN:
+            selected_case = "friction"
+            contributing_mechanisms = ["friction"]
+            phiVn_selected_kN = phiVn_friction_kN
+            shear_key_required = False
+
+        # 2) Anclajes solos
+        elif Vu_kN <= phiVn_anchor_group_kN:
+            selected_case = "anchors"
+            contributing_mechanisms = ["anchors"]
+            phiVn_selected_kN = phiVn_anchor_group_kN
+            shear_key_required = False
+
+        # 3) Fricción + anclajes, solo si se permite
+        elif allow_combined_mechanisms and Vu_kN <= (phiVn_friction_kN + phiVn_anchor_group_kN):
+            selected_case = "friction+anchors"
+            contributing_mechanisms = ["friction", "anchors"]
+            phiVn_selected_kN = phiVn_friction_kN + phiVn_anchor_group_kN
+            shear_key_required = False
+            mechanism_warning = (
+                "Se está usando combinación fricción + anclajes. "
+                "Debes asegurarte de que sea compatible en rigidez y deformación."
+            )
+
+        # 4) No alcanza sin shear key
+        else:
+            selected_case = "shear_key_required"
+            shear_key_required = True
+
+            if allow_combined_mechanisms:
+                phiVn_selected_kN = phiVn_friction_kN + phiVn_anchor_group_kN
+                contributing_mechanisms = ["friction", "anchors"]
+            else:
+                # tomamos el mejor de los dos mecanismos individuales
+                if phiVn_friction_kN >= phiVn_anchor_group_kN:
+                    phiVn_selected_kN = phiVn_friction_kN
+                    contributing_mechanisms = ["friction"]
+                else:
+                    phiVn_selected_kN = phiVn_anchor_group_kN
+                    contributing_mechanisms = ["anchors"]
+
+            Vu_remaining_for_key_kN = max(Vu_kN - phiVn_selected_kN, 0.0)
+
+            mechanism_warning = (
+                "La resistencia disponible sin shear key no alcanza. "
+                "Se requiere diseñar una shear key / shear lug para el cortante remanente."
+            )
+
+    # --------------------------------------------------------
+    # MODO MANUAL
+    # --------------------------------------------------------
+    elif base_shear_mode == "manual":
+
+        if base_shear_mechanism == "friction":
+            phiVn_selected_kN = phiVn_friction_kN
+            contributing_mechanisms = ["friction"]
+            selected_case = "manual_friction"
+
+        elif base_shear_mechanism == "anchors":
+            phiVn_selected_kN = phiVn_anchor_group_kN
+            contributing_mechanisms = ["anchors"]
+            selected_case = "manual_anchors"
+
+        elif base_shear_mechanism == "shear_key":
+            phiVn_selected_kN = phiVn_shear_key_kN
+            contributing_mechanisms = ["shear_key"]
+            selected_case = "manual_shear_key"
+
+        elif base_shear_mechanism == "combined":
+            if not allow_combined_mechanisms:
+                phiVn_selected_kN = 0.0
+                contributing_mechanisms = []
+                selected_case = "manual_combined_not_allowed"
+                mechanism_warning = (
+                    "Seleccionaste mecanismo combinado, pero no activaste la casilla "
+                    "'Permitir combinación fricción + anclajes'."
+                )
+            else:
+                phiVn_selected_kN = (
+                    phiVn_friction_kN
+                    + phiVn_anchor_group_kN
+                    + phiVn_shear_key_kN
+                )
+                contributing_mechanisms = ["friction", "anchors", "shear_key"]
+                selected_case = "manual_combined"
+                mechanism_warning = (
+                    "La combinación de mecanismos se está usando solo como modelo preliminar. "
+                    "Debe asegurarse compatibilidad de rigidez y deformación."
+                )
+        else:
+            raise ValueError("Mecanismo manual no reconocido.")
+
+        shear_key_required = False
+        Vu_remaining_for_key_kN = 0.0
+
+    else:
+        raise ValueError("base_shear_mode debe ser 'auto_detect' o 'manual'.")
+
+    shear_ok = Vu_kN <= phiVn_selected_kN if phiVn_selected_kN > 0 else False
+    utilization = Vu_kN / phiVn_selected_kN if phiVn_selected_kN > 0 else float("inf")
+
+    return {
+        "uniaxial_axis": uniaxial_axis,
+        "Vu_kN": Vu_kN,
+        "base_shear_mode": base_shear_mode,
+        "base_shear_mechanism": base_shear_mechanism,
+        "selected_case": selected_case,
+        "mu": mu,
+        "phi_base_friction": phi_base_friction,
+        "Pu_comp_kN": Pu_comp_kN,
+        "phiVn_friction_kN": phiVn_friction_kN,
+        "phiVn_anchor_group_kN": phiVn_anchor_group_kN,
+        "phiVn_shear_key_kN": phiVn_shear_key_kN,
+        "phiVn_selected_kN": phiVn_selected_kN,
+        "contributing_mechanisms": contributing_mechanisms,
+        "mechanism_warning": mechanism_warning,
+        "shear_key_required": shear_key_required,
+        "Vu_remaining_for_key_kN": Vu_remaining_for_key_kN,
+        "shear_ok": shear_ok,
+        "utilization": utilization,
+    }
 # ============================================================
 # FUNCIONES DE GRÁFICO
 # ============================================================
@@ -1687,6 +1877,39 @@ with st.sidebar.expander("Módulo 8 - ACI 17.9 geometría mínima", expanded=Fal
         step=5.0
     )
 
+with st.sidebar.expander("Módulo 9 - cortante en la base", expanded=False):
+    base_shear_mode = st.selectbox(
+        "Modo de evaluación del cortante",
+        ["auto_detect", "manual"],
+        index=0
+    )
+
+    base_shear_mechanism = st.selectbox(
+        "Mecanismo manual (si eliges manual)",
+        ["friction", "anchors", "shear_key", "combined"],
+        index=0
+    )
+
+    phi_base_friction = st.number_input(
+        "φ fricción en la base",
+        min_value=0.01,
+        max_value=1.00,
+        value=1.00,
+        step=0.01
+    )
+
+    phiVn_shear_key_external_kN = st.number_input(
+        "φVn de shear key / shear lug [kN] (si ya está definido)",
+        min_value=0.0,
+        value=0.0,
+        step=5.0
+    )
+
+    allow_combined_mechanisms = st.checkbox(
+        "¿Permitir combinación fricción + anclajes?",
+        value=False
+    )
+
 with st.sidebar.expander("Pedestal", expanded=True):
     B_ped_mm = st.number_input("B pedestal [mm]", min_value=0.001, value=900.0)
     N_ped_mm = st.number_input("N pedestal [mm]", min_value=0.001, value=900.0)
@@ -1935,11 +2158,30 @@ try:
             tests_permit_greater_hef=tests_permit_greater_hef,
         )
     else:
-        module8_results = None        
+        module8_results = None   
+
+    # --------------------------------------------------------
+    # MÓDULO 9
+    # --------------------------------------------------------
+    if analysis_mode == "Uniaxial":
+        module9_results = module9_base_shear_transfer(
+            loads=loads,
+            module5_results=module5_results,
+            analysis_mode=analysis_mode,
+            uniaxial_axis=uniaxial_axis,
+            base_shear_mode=base_shear_mode,
+            base_shear_mechanism=base_shear_mechanism,
+            mu=mu,
+            phi_base_friction=phi_base_friction,
+            phiVn_shear_key_external_kN=phiVn_shear_key_external_kN,
+            allow_combined_mechanisms=allow_combined_mechanisms,
+        )
+    else:
+        module9_results = None    
     # --------------------------------------------------------
     # PESTAÑAS
     # --------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
     "Datos y geometría",
     "Módulo 1 - Uniaxial",
     "Módulo 2 - Compresión",
@@ -1949,6 +2191,7 @@ try:
     "Módulo 6 - Concreto tensión",
     "Módulo 7 - Concreto cortante",
     "Módulo 8 - ACI 17.9",
+    "Módulo 9 - Cortante base",
     "Biaxial",
     "Resumen",
     ])
@@ -2403,12 +2646,56 @@ try:
                 st.success("El arreglo cumple los mínimos geométricos revisados de ACI 17.9 en esta etapa.")
 
     with tab10:
+        st.subheader("Módulo 9 - transferencia de cortante en la base")
+
+        if analysis_mode != "Uniaxial":
+            st.info("En la barra lateral elegiste modo Biaxial. Cambia a Uniaxial para activar este módulo.")
+        else:
+            mod9_rows = [
+                ["Eje uniaxial", module9_results["uniaxial_axis"]],
+                ["Vu [kN]", f"{module9_results['Vu_kN']:.5f}"],
+                ["Modo de evaluación", module9_results["base_shear_mode"]],
+                ["Caso seleccionado", module9_results["selected_case"]],
+                ["μ", f"{module9_results['mu']:.3f}"],
+                ["φ fricción", f"{module9_results['phi_base_friction']:.3f}"],
+                ["Pu en compresión [kN]", f"{module9_results['Pu_comp_kN']:.5f}"],
+                ["φVn fricción [kN]", f"{module9_results['phiVn_friction_kN']:.5f}"],
+                ["φVn grupo de anclajes [kN]", f"{module9_results['phiVn_anchor_group_kN']:.5f}"],
+                ["φVn shear key/lug [kN]", f"{module9_results['phiVn_shear_key_kN']:.5f}"],
+                ["φVn considerado [kN]", f"{module9_results['phiVn_selected_kN']:.5f}"],
+                ["Mecanismos contribuyentes", ", ".join(module9_results["contributing_mechanisms"]) if module9_results["contributing_mechanisms"] else "-"],
+                ["¿Se requiere shear key?", "Sí" if module9_results["shear_key_required"] else "No"],
+                ["Vu remanente para shear key [kN]", f"{module9_results['Vu_remaining_for_key_kN']:.5f}"],
+                ["Utilización Vu/φVn", f"{module9_results['utilization']:.5f}"],
+                ["Chequeo del mecanismo actual", "Cumple" if module9_results["shear_ok"] else "No cumple"],
+            ]
+
+            mod9_df = pd.DataFrame(mod9_rows, columns=["Parámetro", "Valor"])
+            st.dataframe(mod9_df, use_container_width=True, hide_index=True)
+
+            if module9_results["mechanism_warning"] is not None:
+                st.warning(module9_results["mechanism_warning"])
+
+            st.info(
+                "ACI 17.11 cubre las fallas del concreto de attachments con shear lugs, "
+                "pero no cubre el diseño del acero ni de la soldadura de la placa y del lug."
+            )
+
+            if module9_results["shear_key_required"]:
+                st.error(
+                    f"Con la resistencia disponible sin shear key, no alcanza el cortante. "
+                    f"La shear key debería resistir al menos {module9_results['Vu_remaining_for_key_kN']:.3f} kN."
+                )
+            else:
+                st.success("No se requiere shear key en esta evaluación.")
+
+    with tab11:
         st.subheader("Modo biaxial")
         st.info(
             "Aquí irá el módulo biaxial una vez que cerremos y depuremos bien el flujo uniaxial."
         )
 
-    with tab11:
+    with tab12:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
         st.write("- Base geométrica")
@@ -2420,8 +2707,9 @@ try:
         st.write("- Módulo 6 concreto en tensión")
         st.write("- Módulo 7 concreto en cortante")
         st.write("- Módulo 8 requisitos geométricos ACI 17.9")
+        st.write("- Módulo 9 mecanismo de cortante en la base")
         st.write("**Siguiente módulo a integrar:**")
-        st.write("- Módulo 9: soldadura y mecanismo de transferencia de cortante en la base")
+        st.write("- Módulo 10: soldadura columna-placa y, si aplica, soldadura del shear lug")
 
 except Exception as exc:
     st.error(f"Error en los datos de entrada: {exc}")
