@@ -2050,6 +2050,11 @@ def module12_biaxial_grid_refinement(
         "critical_bolt": critical_bolt,
         "Tmax_refined_kN": Tmax_refined_kN,
         "bolt_tension_df": bolt_tension_df,
+        "X": X,
+        "Y": Y,
+        "Q": Q,
+        "Qpos": Qpos,
+        "Qneg": Qneg,
     }
 # ============================================================
 # MÓDULO 13 - CIERRE DEL DISEÑO Y REPORTE GLOBAL
@@ -2282,6 +2287,188 @@ def module13_design_summary(
         "global_status": global_status,
         "critical_checks": critical_checks,
     }
+# ============================================================
+# MÓDULO 14 - GRÁFICAS DE PRESIÓN Y TRACCIÓN
+# ============================================================
+
+def _uniaxial_contact_distribution(module2_results, base_plate: BasePlateGeometry, axis: str, npts: int = 201):
+    """
+    Devuelve coordenadas y presión de contacto uniaxial para graficar.
+    """
+
+    if axis == "x":
+        L = base_plate.N_bp_mm
+    elif axis == "y":
+        L = base_plate.B_bp_mm
+    else:
+        raise ValueError("axis debe ser 'x' o 'y'.")
+
+    s = np.linspace(-L/2.0, L/2.0, int(npts))
+    q = np.zeros_like(s)
+
+    e = module2_results["e_mm"]
+    qmax = module2_results["q_max_MPa"]
+
+    if module2_results["case"] == "full_compression":
+        qavg = module2_results["q_avg_MPa"]
+        factor = 6.0 * e / L
+        q = qavg * (1.0 + 2.0 * factor * s / (L/2.0))
+        q = np.maximum(q, 0.0)
+
+    else:
+        a = module2_results["a_comp_mm"]
+
+        if e >= 0:
+            s0 = L/2.0 - a
+            s1 = L/2.0
+            mask = (s >= s0) & (s <= s1)
+            q[mask] = qmax * (s[mask] - s0) / a
+        else:
+            s0 = -L/2.0
+            s1 = -L/2.0 + a
+            mask = (s >= s0) & (s <= s1)
+            q[mask] = qmax * (s1 - s[mask]) / a
+
+    return s, q
+
+
+def plot_uniaxial_pressure(module2_results, base_plate: BasePlateGeometry, axis: str, npts: int = 201):
+    """
+    Gráfica uniaxial de presión de contacto.
+    """
+    s, q = _uniaxial_contact_distribution(module2_results, base_plate, axis, npts=npts)
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(s, q, linewidth=2)
+    ax.fill_between(s, q, 0, alpha=0.25)
+
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.set_xlabel(f"Coordenada en dirección resistente {'N' if axis == 'x' else 'B'} [mm]")
+    ax.set_ylabel("Presión de contacto [MPa]")
+    ax.set_title("Distribución uniaxial de presión de contacto")
+    ax.grid(True, linestyle="--", alpha=0.35)
+
+    return fig
+
+
+def plot_uniaxial_anchor_tension(base_plate: BasePlateGeometry, bolt_df: pd.DataFrame, module3_results: dict, axis: str):
+    """
+    Mapa en planta de tracción en pernos para el caso uniaxial.
+    """
+    B = base_plate.B_bp_mm
+    N = base_plate.N_bp_mm
+
+    df = bolt_df.copy()
+    df["T_plot_kN"] = 0.0
+
+    if module3_results["tension_active"]:
+        critical_bolts = module3_results["critical_bolts"]
+        Tbolt = module3_results["T_per_bolt_kN"]
+        df.loc[df["Perno"].isin(critical_bolts), "T_plot_kN"] = Tbolt
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+
+    # placa
+    ax.add_patch(Rectangle(
+        (-B/2, -N/2), B, N,
+        fill=False, linewidth=2.0, edgecolor="black"
+    ))
+
+    vmax = max(df["T_plot_kN"].max(), 1e-9)
+
+    for _, row in df.iterrows():
+        sc = ax.scatter(
+            row["x_mm"], row["y_mm"],
+            s=180,
+            c=row["T_plot_kN"],
+            vmin=0.0,
+            vmax=vmax,
+            cmap="Reds",
+            edgecolors="blue"
+        )
+        ax.text(row["x_mm"] + 6, row["y_mm"] + 6, str(int(row["Perno"])), fontsize=9)
+
+    cbar = fig.colorbar(sc, ax=ax)
+    cbar.set_label("Tracción por perno [kN]")
+
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_title("Tracción uniaxial en pernos")
+    ax.grid(True, linestyle="--", alpha=0.35)
+
+    return fig
+
+
+def plot_biaxial_pressure_field(module12_results: dict, title: str = "Presión biaxial", use_positive_only: bool = False):
+    """
+    Mapa de presión biaxial usando la malla del Módulo 12.
+    """
+    X = module12_results["X"]
+    Y = module12_results["Y"]
+
+    if use_positive_only:
+        Z = module12_results["Qpos"]
+    else:
+        Z = module12_results["Q"]
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    m = ax.contourf(X, Y, Z, levels=30, cmap="coolwarm")
+    fig.colorbar(m, ax=ax, label="Presión [MPa]")
+
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_title(title)
+    ax.grid(True, linestyle="--", alpha=0.20)
+
+    return fig
+
+
+def plot_biaxial_anchor_tension(base_plate: BasePlateGeometry, module12_results: dict):
+    """
+    Mapa en planta de tracción refinada en pernos para el caso biaxial.
+    """
+    B = base_plate.B_bp_mm
+    N = base_plate.N_bp_mm
+
+    df = module12_results["bolt_tension_df"].copy()
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+
+    # placa
+    ax.add_patch(Rectangle(
+        (-B/2, -N/2), B, N,
+        fill=False, linewidth=2.0, edgecolor="black"
+    ))
+
+    vmax = max(df["T_refined_kN"].max(), 1e-9)
+
+    for _, row in df.iterrows():
+        sc = ax.scatter(
+            row["x_mm"], row["y_mm"],
+            s=180,
+            c=row["T_refined_kN"],
+            vmin=0.0,
+            vmax=vmax,
+            cmap="Reds",
+            edgecolors="blue"
+        )
+        ax.text(row["x_mm"] + 6, row["y_mm"] + 6, str(int(row["Perno"])), fontsize=9)
+
+    cbar = fig.colorbar(sc, ax=ax)
+    cbar.set_label("Tracción refinada por perno [kN]")
+
+    # centroide de compresión
+    ax.plot(module12_results["xC_mm"], module12_results["yC_mm"], "k+", markersize=12, markeredgewidth=2)
+
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_title("Tracción refinada biaxial en pernos")
+    ax.grid(True, linestyle="--", alpha=0.35)
+
+    return fig
 # ============================================================
 # FUNCIONES DE GRÁFICO
 # ============================================================
@@ -2771,6 +2958,25 @@ with st.sidebar.expander("Módulo 12 - refinamiento biaxial", expanded=False):
         "Distribuir tracción biaxial preliminar en pernos",
         value=True
     )
+
+with st.sidebar.expander("Módulo 14 - gráficas", expanded=False):
+    show_elastic_biaxial_pressure = st.checkbox(
+        "Mostrar presión elástica biaxial q(x,y)",
+        value=True
+    )
+
+    show_contact_biaxial_pressure = st.checkbox(
+        "Mostrar presión de contacto q⁺(x,y)",
+        value=True
+    )
+
+    uniaxial_plot_points = st.number_input(
+        "Puntos para gráfica uniaxial",
+        min_value=21,
+        max_value=1001,
+        value=201,
+        step=20
+    )    
 with st.sidebar.expander("Pedestal", expanded=True):
     B_ped_mm = st.number_input("B pedestal [mm]", min_value=0.001, value=900.0)
     N_ped_mm = st.number_input("N pedestal [mm]", min_value=0.001, value=900.0)
@@ -3103,9 +3309,48 @@ try:
         module12_results=module12_results if analysis_mode == "Biaxial" else None,
     )
     # --------------------------------------------------------
+    # MÓDULO 14 - GRÁFICAS
+    # --------------------------------------------------------
+    module14_figs = {}
+
+    if analysis_mode == "Uniaxial":
+        module14_figs["uniaxial_pressure"] = plot_uniaxial_pressure(
+            module2_results=module2_results,
+            base_plate=base_plate,
+            axis=uniaxial_axis,
+            npts=uniaxial_plot_points,
+        )
+
+        module14_figs["uniaxial_anchor_tension"] = plot_uniaxial_anchor_tension(
+            base_plate=base_plate,
+            bolt_df=bolt_df,
+            module3_results=module3_results,
+            axis=uniaxial_axis,
+        )
+
+    elif analysis_mode == "Biaxial":
+        if show_elastic_biaxial_pressure:
+            module14_figs["biaxial_elastic_pressure"] = plot_biaxial_pressure_field(
+                module12_results=module12_results,
+                title="Presión biaxial elástica q(x,y)",
+                use_positive_only=False,
+            )
+
+        if show_contact_biaxial_pressure:
+            module14_figs["biaxial_contact_pressure"] = plot_biaxial_pressure_field(
+                module12_results=module12_results,
+                title="Presión de contacto q⁺(x,y)",
+                use_positive_only=True,
+            )
+
+        module14_figs["biaxial_anchor_tension"] = plot_biaxial_anchor_tension(
+            base_plate=base_plate,
+            module12_results=module12_results,
+        )
+    # --------------------------------------------------------
     # PESTAÑAS
     # --------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17 = st.tabs([
     "Datos y geometría",
     "Módulo 1 - Uniaxial",
     "Módulo 2 - Compresión",
@@ -3120,6 +3365,7 @@ try:
     "Módulo 11 - Biaxial preliminar",
     "Módulo 12 - Biaxial refinado",
     "Módulo 13 - Cierre",
+    "Módulo 14 - Gráficas",
     "Resumen",
     "Estado",
     ])
@@ -3834,21 +4080,40 @@ try:
             st.dataframe(critical_df, use_container_width=True, hide_index=True)
         else:
             st.success("No se identificaron chequeos críticos.")    
-    
     with tab15:
+        st.subheader("Módulo 14 - gráficas de presión y tracción")
+
+        if analysis_mode == "Uniaxial":
+            st.markdown("### Distribución de presión uniaxial")
+            st.pyplot(module14_figs["uniaxial_pressure"], clear_figure=True)
+
+            st.markdown("### Tracción en pernos")
+            st.pyplot(module14_figs["uniaxial_anchor_tension"], clear_figure=True)
+
+        elif analysis_mode == "Biaxial":
+            if "biaxial_elastic_pressure" in module14_figs:
+                st.markdown("### Presión biaxial elástica")
+                st.pyplot(module14_figs["biaxial_elastic_pressure"], clear_figure=True)
+
+            if "biaxial_contact_pressure" in module14_figs:
+                st.markdown("### Presión de contacto biaxial")
+                st.pyplot(module14_figs["biaxial_contact_pressure"], clear_figure=True)
+
+            st.markdown("### Tracción refinada en pernos")
+            st.pyplot(module14_figs["biaxial_anchor_tension"], clear_figure=True)
+    with tab16:
         st.subheader("Resumen")
         st.write("Esta pestaña puede reservarse para exportación futura o reporte compacto.")
 
-    with tab16:
+    with tab17:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
         st.write("- Rama uniaxial: Módulos 1 a 10")
         st.write("- Rama biaxial: Módulos 11 y 12")
         st.write("- Cierre global: Módulo 13")
+        st.write("- Gráficas automáticas: Módulo 14")
         st.write("**Siguiente mejora recomendada:**")
-        st.write("- Exportación de reporte")
-        st.write("- Ajuste fino del biaxial no lineal")
-        st.write("- Gráficos de distribución de presión y tracción")
+        st.write("- Módulo 15: memoria de cálculo en Word")
 
 except Exception as exc:
     st.error(f"Error en los datos de entrada: {exc}")
