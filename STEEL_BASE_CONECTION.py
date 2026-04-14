@@ -1638,6 +1638,137 @@ def module10_weld_design(
         "lug_weld_ok": lug_weld_ok,
         "lug_weld_util": lug_weld_util,
     }
+
+# ============================================================
+# MÓDULO 11 - BIAxIAL PRELIMINAR
+# ============================================================
+
+def module11_biaxial_preliminary(
+    loads: Loads,
+    base_plate: BasePlateGeometry,
+    bolt_df: pd.DataFrame,
+) -> dict:
+    """
+    Módulo 11:
+    análisis preliminar biaxial elástico de presión sobre placa base
+    y tracción preliminar en pernos.
+
+    Modelo:
+        q(x,y) = P/A + (My/Iy)*x + (Mx/Ix)*y
+
+    Salidas:
+    - presión en esquinas
+    - qmax, qmin
+    - clasificación preliminar
+    - tracción preliminar en pernos si qmin < 0
+    """
+
+    B = base_plate.B_bp_mm
+    N = base_plate.N_bp_mm
+
+    A = B * N
+    Ix = B * N**3 / 12.0
+    Iy = N * B**3 / 12.0
+
+    Pu_N = loads.Pu_kN * 1_000.0
+    Mux_Nmm = loads.Mux_kNm * 1_000_000.0
+    Muy_Nmm = loads.Muy_kNm * 1_000_000.0
+
+    # --------------------------------------------------------
+    # Presión elástica biaxial
+    # --------------------------------------------------------
+    def q_biaxial(x_mm: float, y_mm: float) -> float:
+        return (Pu_N / A) + (Muy_Nmm / Iy) * x_mm + (Mux_Nmm / Ix) * y_mm
+
+    # Esquinas
+    corners = {
+        "(+B/2,+N/2)": ( B/2.0,  N/2.0),
+        "(+B/2,-N/2)": ( B/2.0, -N/2.0),
+        "(-B/2,+N/2)": (-B/2.0,  N/2.0),
+        "(-B/2,-N/2)": (-B/2.0, -N/2.0),
+    }
+
+    corner_pressures = {}
+    for label, (x, y) in corners.items():
+        corner_pressures[label] = q_biaxial(x, y)
+
+    q_values = list(corner_pressures.values())
+    q_max = max(q_values)
+    q_min = min(q_values)
+
+    full_compression = q_min >= 0.0
+    possible_uplift = q_min < 0.0
+
+    # --------------------------------------------------------
+    # Excentricidades geométricas
+    # --------------------------------------------------------
+    e_x_mm = Muy_Nmm / Pu_N
+    e_y_mm = Mux_Nmm / Pu_N
+
+    # --------------------------------------------------------
+    # Tracción preliminar en pernos
+    # --------------------------------------------------------
+    bolt_tension_df = bolt_df.copy()
+    bolt_tension_df["demand_index"] = 0.0
+    bolt_tension_df["T_prelim_kN"] = 0.0
+
+    T_total_prelim_kN = 0.0
+    critical_bolt = None
+    Tmax_prelim_kN = 0.0
+
+    if possible_uplift:
+        # índice de demanda elástica preliminar
+        # combinación del signo real de Mx y My
+        bolt_tension_df["demand_index"] = (
+            (Muy_Nmm / Iy) * bolt_tension_df["x_mm"] +
+            (Mux_Nmm / Ix) * bolt_tension_df["y_mm"]
+        )
+
+        # Solo pernos del lado que más tracciona
+        demand_min = bolt_tension_df["demand_index"].min()
+
+        # Shift para que el mínimo sea 0
+        bolt_tension_df["demand_pos"] = bolt_tension_df["demand_index"] - demand_min
+
+        total_index = bolt_tension_df["demand_pos"].sum()
+
+        # Tracción total preliminar:
+        # se toma como exceso de la presión negativa convertida a fuerza sobre área
+        # aproximación global:
+        uplift_ratio = abs(q_min) / max(q_max, 1e-9)
+        T_total_prelim_kN = uplift_ratio * loads.Pu_kN
+
+        if total_index > 0:
+            bolt_tension_df["T_prelim_kN"] = (
+                T_total_prelim_kN * bolt_tension_df["demand_pos"] / total_index
+            )
+        else:
+            bolt_tension_df["T_prelim_kN"] = 0.0
+
+        Tmax_prelim_kN = bolt_tension_df["T_prelim_kN"].max()
+        if Tmax_prelim_kN > 0:
+            critical_bolt_row = bolt_tension_df.loc[bolt_tension_df["T_prelim_kN"].idxmax()]
+            critical_bolt = int(critical_bolt_row["Perno"])
+
+    return {
+        "A_mm2": A,
+        "Ix_mm4": Ix,
+        "Iy_mm4": Iy,
+        "Pu_kN": loads.Pu_kN,
+        "Mux_kNm": loads.Mux_kNm,
+        "Muy_kNm": loads.Muy_kNm,
+        "e_x_mm": e_x_mm,
+        "e_y_mm": e_y_mm,
+        "corner_pressures_MPa": corner_pressures,
+        "q_max_MPa": q_max,
+        "q_min_MPa": q_min,
+        "full_compression": full_compression,
+        "possible_uplift": possible_uplift,
+        "T_total_prelim_kN": T_total_prelim_kN,
+        "Tmax_prelim_kN": Tmax_prelim_kN,
+        "critical_bolt": critical_bolt,
+        "bolt_tension_df": bolt_tension_df,
+    }
 # ============================================================
 # FUNCIONES DE GRÁFICO
 # ============================================================
@@ -2387,9 +2518,20 @@ try:
     else:
         module10_results = None
     # --------------------------------------------------------
+    # MÓDULO 11
+    # --------------------------------------------------------
+    if analysis_mode == "Biaxial":
+        module11_results = module11_biaxial_preliminary(
+            loads=loads,
+            base_plate=base_plate,
+            bolt_df=bolt_df,
+        )
+    else:
+        module11_results = None
+    # --------------------------------------------------------
     # PESTAÑAS
     # --------------------------------------------------------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14 = st.tabs([
     "Datos y geometría",
     "Módulo 1 - Uniaxial",
     "Módulo 2 - Compresión",
@@ -2401,8 +2543,9 @@ try:
     "Módulo 8 - ACI 17.9",
     "Módulo 9 - Cortante base",
     "Módulo 10 - Soldadura",
-    "Biaxial",
+    "Módulo 11 - Biaxial",
     "Resumen",
+    "Estado",
     ])
 
     with tab1:
@@ -2968,28 +3111,72 @@ try:
                 "Si la base forma parte de un sistema sísmico especial, las soldaduras de column-to-base plate "
                 "pueden tener requisitos adicionales en AISC 341 / AWS D1.8."
             )
-    with tab12:
-        st.subheader("Modo biaxial")
-        st.info(
-            "Aquí irá el módulo biaxial una vez que cerremos y depuremos bien el flujo uniaxial."
-        )
 
+    with tab12:
+        st.subheader("Módulo 11 - análisis biaxial preliminar")
+
+        if analysis_mode != "Biaxial":
+            st.info("En la barra lateral elegiste modo Uniaxial. Cambia a Biaxial para activar este módulo.")
+        else:
+            mod11_rows = [
+                ["Pu [kN]", f"{module11_results['Pu_kN']:.5f}"],
+                ["Mux [kN·m]", f"{module11_results['Mux_kNm']:.5f}"],
+                ["Muy [kN·m]", f"{module11_results['Muy_kNm']:.5f}"],
+                ["Área de placa [mm²]", f"{module11_results['A_mm2']:.3f}"],
+                ["Ix [mm⁴]", f"{module11_results['Ix_mm4']:.3f}"],
+                ["Iy [mm⁴]", f"{module11_results['Iy_mm4']:.3f}"],
+                ["e_x = Muy/Pu [mm]", f"{module11_results['e_x_mm']:.3f}"],
+                ["e_y = Mux/Pu [mm]", f"{module11_results['e_y_mm']:.3f}"],
+                ["q_max [MPa]", f"{module11_results['q_max_MPa']:.5f}"],
+                ["q_min [MPa]", f"{module11_results['q_min_MPa']:.5f}"],
+                ["Compresión total preliminar", "Sí" if module11_results["full_compression"] else "No"],
+                ["Posible levantamiento preliminar", "Sí" if module11_results["possible_uplift"] else "No"],
+                ["Tracción total preliminar [kN]", f"{module11_results['T_total_prelim_kN']:.5f}"],
+                ["Perno crítico preliminar", "-" if module11_results["critical_bolt"] is None else str(module11_results["critical_bolt"])],
+                ["Tracción máxima preliminar por perno [kN]", f"{module11_results['Tmax_prelim_kN']:.5f}"],
+            ]
+
+            st.dataframe(
+                pd.DataFrame(mod11_rows, columns=["Parámetro", "Valor"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.markdown("### Presiones en las esquinas")
+            corner_df = pd.DataFrame(
+                [
+                    {"Esquina": k, "q [MPa]": v}
+                    for k, v in module11_results["corner_pressures_MPa"].items()
+                ]
+            )
+            st.dataframe(corner_df, use_container_width=True, hide_index=True)
+
+            st.markdown("### Tracción preliminar en pernos")
+            st.dataframe(
+                module11_results["bolt_tension_df"][["Perno", "x_mm", "y_mm", "demand_index", "T_prelim_kN"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            if module11_results["possible_uplift"]:
+                st.warning(
+                    "Este módulo detecta posible levantamiento en biaxial y asigna una tracción preliminar elástica a los pernos. "
+                    "Es una aproximación útil para depuración, no el equilibrio final no lineal."
+                )
+            else:
+                st.success("En esta evaluación preliminar biaxial, toda la placa permanece en compresión.")
     with tab13:
+        st.subheader("Resumen")
+        st.write("Aquí puedes ir consolidando después un resumen global de chequeos.")
+
+    with tab14:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
         st.write("- Base geométrica")
-        st.write("- Módulo 1 uniaxial preliminar")
-        st.write("- Módulo 2 compresión bajo placa")
-        st.write("- Módulo 3 tracción preliminar en pernos")
-        st.write("- Módulo 4 espesor de placa")
-        st.write("- Módulo 5 acero del anclaje")
-        st.write("- Módulo 6 concreto en tensión")
-        st.write("- Módulo 7 concreto en cortante")
-        st.write("- Módulo 8 requisitos geométricos ACI 17.9")
-        st.write("- Módulo 9 mecanismo de cortante en la base")
-        st.write("- Módulo 10 soldadura preliminar")
-        st.write("**Siguiente módulo a integrar:**")
-        st.write("- Módulo 11: rama biaxial")
+        st.write("- Módulos 1 a 10 en rama uniaxial")
+        st.write("- Módulo 11 biaxial preliminar")
+        st.write("**Siguiente módulo recomendado:**")
+        st.write("- Refinamiento biaxial: equilibrio no lineal de compresión + tracción en pernos")
 
 except Exception as exc:
     st.error(f"Error en los datos de entrada: {exc}")
