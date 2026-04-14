@@ -6,7 +6,14 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from matplotlib.patches import Circle, Rectangle
+import os
+import tempfile
+from datetime import datetime
 
+from docx import Document
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_SECTION
 
 # ============================================================
 # CONFIGURACIÓN GENERAL
@@ -2469,6 +2476,500 @@ def plot_biaxial_anchor_tension(base_plate: BasePlateGeometry, module12_results:
     ax.grid(True, linestyle="--", alpha=0.35)
 
     return fig
+
+# ============================================================
+# MÓDULO 15 - AUXILIARES PARA MEMORIA WORD
+# ============================================================
+
+def docx_add_title(doc: Document, text: str):
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(text)
+    r.bold = True
+    r.font.size = Pt(16)
+
+
+def docx_add_subtitle(doc: Document, text: str):
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(text)
+    r.italic = True
+    r.font.size = Pt(10)
+
+
+def docx_add_heading(doc: Document, text: str, level: int = 1):
+    doc.add_heading(text, level=level)
+
+
+def docx_add_equation_line(doc: Document, eq_text: str):
+    """
+    Primera versión estable:
+    agrega ecuación como línea centrada y formateada.
+    """
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(eq_text)
+    r.italic = True
+    r.font.size = Pt(11)
+
+
+def docx_add_normal_paragraph(doc: Document, text: str):
+    p = doc.add_paragraph(text)
+    p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    return p
+
+
+def docx_add_small_note(doc: Document, text: str):
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    r = p.add_run(text)
+    r.italic = True
+    r.font.size = Pt(9)
+
+
+def docx_add_key_value_table(doc: Document, rows_data: list, title: str = None):
+    """
+    rows_data = [(parametro, valor), ...]
+    """
+    if title:
+        p = doc.add_paragraph()
+        r = p.add_run(title)
+        r.bold = True
+
+    table = doc.add_table(rows=1, cols=2)
+    table.style = "Table Grid"
+
+    hdr = table.rows[0].cells
+    hdr[0].text = "Parámetro"
+    hdr[1].text = "Valor"
+
+    for k, v in rows_data:
+        row = table.add_row().cells
+        row[0].text = str(k)
+        row[1].text = str(v)
+
+    doc.add_paragraph("")
+
+
+def docx_add_image(doc: Document, image_path: str, caption: str = None, width_inches: float = 5.8):
+    doc.add_picture(image_path, width=Inches(width_inches))
+    if caption:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(caption)
+        r.italic = True
+        r.font.size = Pt(9)
+
+
+def save_figure_to_temp(fig, filename_stub: str):
+    tmp_dir = tempfile.gettempdir()
+    path = os.path.join(tmp_dir, f"{filename_stub}.png")
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    return path
+
+# ============================================================
+# MÓDULO 15 - GENERACIÓN DE MEMORIA DE CÁLCULO EN WORD
+# ============================================================
+
+def module15_generate_word_report(
+    analysis_mode: str,
+    loads: Loads,
+    materials: Materials,
+    column_plot: dict,
+    base_plate: BasePlateGeometry,
+    anchors: AnchorLayout,
+    pedestal: PedestalGeometry,
+    module13_results: dict,
+    module14_figs: dict,
+    module2_results=None,
+    module4_results=None,
+    module5_results=None,
+    module6_results=None,
+    module7_results=None,
+    module8_results=None,
+    module9_results=None,
+    module10_results=None,
+    module11_results=None,
+    module12_results=None,
+):
+    """
+    Genera la memoria de cálculo en formato .docx.
+    """
+
+    doc = Document()
+
+    # Márgenes
+    sec = doc.sections[0]
+    sec.top_margin = Inches(0.8)
+    sec.bottom_margin = Inches(0.8)
+    sec.left_margin = Inches(0.9)
+    sec.right_margin = Inches(0.9)
+
+    # --------------------------------------------------------
+    # Portada
+    # --------------------------------------------------------
+    docx_add_title(doc, "MEMORIA DE CÁLCULO")
+    docx_add_title(doc, "DISEÑO DE PLACA BASE DE ACERO")
+    docx_add_subtitle(doc, f"Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    docx_add_subtitle(doc, "Base normativa: AISC 360-22, ACI 318-25")
+    doc.add_paragraph("")
+
+    docx_add_normal_paragraph(
+        doc,
+        "El presente documento resume el proceso de verificación de una conexión de placa base de acero "
+        "sobre pedestal de hormigón, incluyendo revisión de presión bajo placa, espesor de placa, "
+        "anclajes, concreto, cortante en la base y soldadura, según el modo de análisis seleccionado."
+    )
+
+    doc.add_page_break()
+
+    # --------------------------------------------------------
+    # 1. Datos de entrada
+    # --------------------------------------------------------
+    docx_add_heading(doc, "1. Datos de entrada", level=1)
+
+    docx_add_key_value_table(doc, [
+        ("Pu [kN]", f"{loads.Pu_kN:.3f}"),
+        ("Mux [kN·m]", f"{loads.Mux_kNm:.3f}"),
+        ("Muy [kN·m]", f"{loads.Muy_kNm:.3f}"),
+        ("Vux [kN]", f"{loads.Vux_kN:.3f}"),
+        ("Vuy [kN]", f"{loads.Vuy_kN:.3f}"),
+    ], title="Cargas")
+
+    docx_add_key_value_table(doc, [
+        ("Fy placa [MPa]", f"{materials.Fy_plate_MPa:.3f}"),
+        ("Fu placa [MPa]", f"{materials.Fu_plate_MPa:.3f}"),
+        ("f'c [MPa]", f"{materials.fc_MPa:.3f}"),
+        ("Fy anclaje [MPa]", f"{materials.Fy_anchor_MPa:.3f}"),
+        ("Fu anclaje [MPa]", f"{materials.Fu_anchor_MPa:.3f}"),
+    ], title="Materiales")
+
+    docx_add_key_value_table(doc, [
+        ("Tipo de perfil", str(column_plot.get("section_type", "-"))),
+        ("d [mm]", f"{column_plot.get('d_mm', 0.0):.3f}"),
+        ("bf [mm]", f"{column_plot.get('bf_mm', 0.0):.3f}"),
+        ("tf [mm]", f"{column_plot.get('tf_mm', 0.0):.3f}"),
+        ("tw [mm]", f"{column_plot.get('tw_mm', 0.0):.3f}"),
+    ], title="Perfil de columna")
+
+    docx_add_key_value_table(doc, [
+        ("B placa [mm]", f"{base_plate.B_bp_mm:.3f}"),
+        ("N placa [mm]", f"{base_plate.N_bp_mm:.3f}"),
+        ("tp [mm]", f"{base_plate.tp_mm:.3f}"),
+    ], title="Placa base")
+
+    docx_add_key_value_table(doc, [
+        ("nbx", f"{anchors.nbx}"),
+        ("nby", f"{anchors.nby}"),
+        ("edge_x [mm]", f"{anchors.edge_x_mm:.3f}"),
+        ("edge_y [mm]", f"{anchors.edge_y_mm:.3f}"),
+        ("db [mm]", f"{anchors.db_mm:.3f}"),
+        ("Ab [mm²]", f"{anchors.Ab_mm2:.3f}"),
+        ("hef [mm]", f"{anchors.hef_mm:.3f}"),
+    ], title="Anclajes")
+
+    docx_add_key_value_table(doc, [
+        ("B pedestal [mm]", f"{pedestal.B_ped_mm:.3f}"),
+        ("N pedestal [mm]", f"{pedestal.N_ped_mm:.3f}"),
+        ("h pedestal [mm]", f"{pedestal.h_ped_mm:.3f}"),
+    ], title="Pedestal")
+
+    # --------------------------------------------------------
+    # 2. Desarrollo del cálculo
+    # --------------------------------------------------------
+    docx_add_heading(doc, "2. Desarrollo del cálculo", level=1)
+
+    if analysis_mode == "Uniaxial":
+        # Módulo 2
+        if module2_results is not None:
+            docx_add_heading(doc, "2.1 Presión de contacto bajo placa", level=2)
+            docx_add_normal_paragraph(
+                doc,
+                "La presión de contacto bajo placa se evaluó bajo hipótesis uniaxial. "
+                "Cuando la resultante permanece dentro del núcleo central, se adopta distribución lineal de presiones. "
+                "Si la excentricidad excede el núcleo, se considera compresión parcial."
+            )
+            docx_add_equation_line(doc, "q_max = (P/A) · (1 + 6e/L)")
+            docx_add_equation_line(doc, "q_min = (P/A) · (1 - 6e/L)")
+            docx_add_small_note(
+                doc,
+                "Referencia: AISC 360-22, Sección J8 (Column Bases and Bearing on Concrete)."
+            )
+            docx_add_key_value_table(doc, [
+                ("Caso", "Compresión total" if module2_results["case"] == "full_compression" else "Compresión parcial"),
+                ("q_max [MPa]", f"{module2_results['q_max_MPa']:.5f}"),
+                ("q_min [MPa]", f"{module2_results['q_min_MPa']:.5f}"),
+                ("a comprimida [mm]", f"{module2_results['a_comp_mm']:.3f}"),
+                ("φ·0.85·f'c [MPa]", f"{module2_results['q_allow_phi_MPa']:.5f}"),
+                ("Bearing", "Cumple" if module2_results["bearing_ok"] else "No cumple"),
+            ])
+
+        # Módulo 4
+        if module4_results is not None:
+            docx_add_heading(doc, "2.2 Espesor de placa", level=2)
+            docx_add_normal_paragraph(
+                doc,
+                "El espesor mínimo requerido se estimó modelando la placa como una franja en voladizo "
+                "cargada por la presión de contacto gobernante."
+            )
+            docx_add_equation_line(doc, "t_req = m · √(2q_u / (φFy))")
+            docx_add_small_note(
+                doc,
+                "Referencia: formulación práctica para placa base en flexión local dentro del marco de AISC 360-22 J8."
+            )
+            docx_add_key_value_table(doc, [
+                ("mx [mm]", f"{module4_results['mx_mm']:.3f}"),
+                ("my [mm]", f"{module4_results['my_mm']:.3f}"),
+                ("m crítico [mm]", f"{module4_results['mcrit_mm']:.3f}"),
+                ("q_u [MPa]", f"{module4_results['q_u_MPa']:.5f}"),
+                ("tp requerido [mm]", f"{module4_results['t_req_mm']:.3f}"),
+                ("tp adoptado [mm]", f"{module4_results['tp_input_mm']:.3f}"),
+                ("Chequeo", "Cumple" if module4_results["thickness_ok"] else "No cumple"),
+            ])
+
+        # Módulo 5
+        if module5_results is not None:
+            docx_add_heading(doc, "2.3 Acero del anclaje", level=2)
+            docx_add_normal_paragraph(
+                doc,
+                "Se verificó la resistencia del acero del anclaje en tensión, cortante e interacción."
+            )
+            docx_add_equation_line(doc, "N_sa = A_se,N · f_uta")
+            docx_add_equation_line(doc, "V_sa = 0.60 · A_se,V · f_uta")
+            docx_add_equation_line(doc, "(N_ua / φN_sa)^2 + (V_ua / φV_sa)^2 ≤ 1.0")
+            docx_add_small_note(
+                doc,
+                "Referencia: ACI 318-25, Capítulo 17 (Anchor steel in tension and shear; interaction)."
+            )
+            docx_add_key_value_table(doc, [
+                ("φNsa [kN]", f"{module5_results['phiNsa_kN']:.5f}"),
+                ("φVsa [kN]", f"{module5_results['phiVsa_kN']:.5f}"),
+                ("Nua por perno [kN]", f"{module5_results['Nua_per_bolt_kN']:.5f}"),
+                ("Vua por perno [kN]", f"{module5_results['Vua_per_bolt_kN']:.5f}"),
+                ("Interacción", f"{module5_results['interaction_value']:.5f}"),
+                ("Chequeo", "Cumple" if module5_results["interaction_ok"] else "No cumple"),
+            ])
+
+        # Módulo 6 y 7
+        if module6_results is not None:
+            docx_add_heading(doc, "2.4 Concreto del anclaje en tensión", level=2)
+            docx_add_normal_paragraph(
+                doc,
+                "Se evaluaron los modos de falla del concreto en tensión: concrete breakout, pullout y side-face blowout, "
+                "adoptando la resistencia gobernante."
+            )
+            docx_add_equation_line(doc, "N_b = k_c λ_a √f'c · h_ef^1.5")
+            docx_add_equation_line(doc, "A_Nco = 9 h_ef^2")
+            docx_add_small_note(
+                doc,
+                "Referencia: ACI 318-25, Sección 17.6."
+            )
+            docx_add_key_value_table(doc, [
+                ("φNcbg [kN]", f"{module6_results['phiNcbg_kN']:.5f}"),
+                ("φNpn [kN]", "-" if module6_results["phiNpn_kN"] is None else f"{module6_results['phiNpn_kN']:.5f}"),
+                ("φNsbg [kN]", "-" if module6_results["phiNsbg_kN"] is None else f"{module6_results['phiNsbg_kN']:.5f}"),
+                ("Resistencia gobernante [kN]", f"{module6_results['phiNn_cg_kN']:.5f}"),
+                ("Nua grupo [kN]", f"{module6_results['Nua_group_kN']:.5f}"),
+                ("Chequeo", "Cumple" if module6_results["concrete_tension_ok"] else "No cumple"),
+            ])
+
+        if module7_results is not None:
+            docx_add_heading(doc, "2.5 Concreto del anclaje en cortante", level=2)
+            docx_add_normal_paragraph(
+                doc,
+                "Se evaluaron preliminarmente el concrete breakout en cortante, el pryout y la interacción N-V del concreto."
+            )
+            docx_add_equation_line(doc, "V_cpg = k_cp · N_cbg")
+            docx_add_equation_line(doc, "(N_ua/φN_n)^(5/3) + (V_ua/φV_n)^(5/3) ≤ 1.0")
+            docx_add_small_note(
+                doc,
+                "Referencia: ACI 318-25, Secciones 17.7 y 17.8."
+            )
+            docx_add_key_value_table(doc, [
+                ("φVcbg [kN]", f"{module7_results['phiVcbg_kN']:.5f}"),
+                ("φVcpg [kN]", f"{module7_results['phiVcpg_kN']:.5f}"),
+                ("Resistencia gobernante [kN]", f"{module7_results['phiVn_cg_kN']:.5f}"),
+                ("Vua grupo [kN]", f"{module7_results['Vua_group_kN']:.5f}"),
+                ("Interacción concreta", f"{module7_results['interaction_concrete']:.5f}"),
+                ("Chequeo", "Cumple" if module7_results["interaction_concrete_ok"] else "No cumple"),
+            ])
+
+        # Módulo 8
+        if module8_results is not None:
+            docx_add_heading(doc, "2.6 Requisitos geométricos mínimos", level=2)
+            docx_add_normal_paragraph(
+                doc,
+                "Se verificaron espaciamiento mínimo, distancia al borde y límite de profundidad de empotramiento, "
+                "según los requisitos geométricos mínimos de ACI para evitar splitting."
+            )
+            docx_add_small_note(
+                doc,
+                "Referencia: ACI 318-25, Sección 17.9."
+            )
+            docx_add_key_value_table(doc, [
+                ("Espaciamiento real mínimo [mm]", f"{module8_results['min_spacing_real_mm']:.3f}"),
+                ("Espaciamiento mínimo requerido [mm]", f"{module8_results['s_min_req_mm']:.3f}"),
+                ("Distancia real mínima al borde [mm]", f"{module8_results['min_edge_real_mm']:.3f}"),
+                ("Distancia mínima requerida [mm]", f"{module8_results['c_min_req_mm']:.3f}"),
+                ("Chequeo global", "Cumple" if module8_results["geometric_ok"] else "No cumple"),
+            ])
+
+        # Módulo 9
+        if module9_results is not None:
+            docx_add_heading(doc, "2.7 Transferencia de cortante en la base", level=2)
+            docx_add_normal_paragraph(
+                doc,
+                "Se evaluó el mecanismo resistente al cortante horizontal en la base, considerando fricción, "
+                "anclajes y necesidad de shear key cuando corresponde."
+            )
+            docx_add_equation_line(doc, "V_n,fr = μ · P_u")
+            docx_add_small_note(
+                doc,
+                "Referencia: AISC 360-22 J8/J9 y ACI 318-25 §17.11 cuando existe shear lug."
+            )
+            docx_add_key_value_table(doc, [
+                ("Vu [kN]", f"{module9_results['Vu_kN']:.5f}"),
+                ("Mecanismo", str(module9_results["selected_case"])),
+                ("φVn considerado [kN]", f"{module9_results['phiVn_selected_kN']:.5f}"),
+                ("¿Requiere shear key?", "Sí" if module9_results["shear_key_required"] else "No"),
+                ("Vu remanente para key [kN]", f"{module9_results['Vu_remaining_for_key_kN']:.5f}"),
+                ("Chequeo", "Cumple" if module9_results["shear_ok"] else "No cumple"),
+            ])
+
+        # Módulo 10
+        if module10_results is not None:
+            docx_add_heading(doc, "2.8 Soldadura", level=2)
+            docx_add_normal_paragraph(
+                doc,
+                "Se revisó preliminarmente la soldadura de filete entre columna y placa base, y la soldadura del shear lug "
+                "si este se requiere."
+            )
+            docx_add_equation_line(doc, "φR_n = φ · 0.60 · F_EXX · A_w")
+            docx_add_equation_line(doc, "A_w = 0.707 · w · L_eff")
+            docx_add_small_note(
+                doc,
+                "Referencia: AISC 360-22, Tabla J2.5 y Sección J2."
+            )
+            docx_add_key_value_table(doc, [
+                ("Tamaño filete columna-base [mm]", f"{module10_results['column_weld_size_mm']:.3f}"),
+                ("Longitud efectiva [mm]", f"{module10_results['L_col_weld_eff_mm']:.3f}"),
+                ("φRn columna-base [kN]", f"{module10_results['phiRn_col_kN']:.5f}"),
+                ("Demanda Tu [kN]", f"{module10_results['Tu_col_base_kN']:.5f}"),
+                ("Chequeo columna-base", "Cumple" if module10_results["col_weld_ok"] else "No cumple"),
+            ])
+
+            if module10_results["shear_key_required"]:
+                docx_add_key_value_table(doc, [
+                    ("Vu lug [kN]", f"{module10_results['Vu_lug_kN']:.5f}"),
+                    ("φRn lug [kN]", f"{module10_results['phiRn_lug_kN']:.5f}"),
+                    ("Chequeo lug-placa", "Cumple" if module10_results["lug_weld_ok"] else "No cumple"),
+                ], title="Soldadura shear lug - placa")
+
+    elif analysis_mode == "Biaxial":
+        docx_add_heading(doc, "2.1 Análisis biaxial", level=2)
+
+        if module11_results is not None:
+            docx_add_normal_paragraph(
+                doc,
+                "Se realizó primero una evaluación biaxial preliminar elástica, obteniendo presiones en las esquinas "
+                "y una primera estimación de la tracción en pernos."
+            )
+            docx_add_equation_line(doc, "q(x,y) = P_u/A + (M_y/I_y)x + (M_x/I_x)y")
+            docx_add_key_value_table(doc, [
+                ("q_max [MPa]", f"{module11_results['q_max_MPa']:.5f}"),
+                ("q_min [MPa]", f"{module11_results['q_min_MPa']:.5f}"),
+                ("Compresión total", "Sí" if module11_results["full_compression"] else "No"),
+                ("Tensión preliminar total [kN]", f"{module11_results['T_total_prelim_kN']:.5f}"),
+                ("Perno crítico preliminar", "-" if module11_results["critical_bolt"] is None else str(module11_results["critical_bolt"])),
+            ])
+
+        if module12_results is not None:
+            docx_add_normal_paragraph(
+                doc,
+                "Posteriormente se refinó la evaluación mediante integración por malla sobre la placa, "
+                "separando zonas comprimidas y levantadas, y distribuyendo la tracción preliminar en el grupo de pernos."
+            )
+            docx_add_key_value_table(doc, [
+                ("q_max [MPa]", f"{module12_results['q_max_MPa']:.5f}"),
+                ("q_min [MPa]", f"{module12_results['q_min_MPa']:.5f}"),
+                ("C total [kN]", f"{module12_results['C_kN']:.5f}"),
+                ("T equivalente [kN]", f"{module12_results['T_equiv_kN']:.5f}"),
+                ("xC [mm]", f"{module12_results['xC_mm']:.5f}"),
+                ("yC [mm]", f"{module12_results['yC_mm']:.5f}"),
+                ("Residual Mx [kN·m]", f"{module12_results['Mx_residual_kNm']:.5f}"),
+                ("Residual My [kN·m]", f"{module12_results['My_residual_kNm']:.5f}"),
+                ("Perno crítico refinado", "-" if module12_results["critical_bolt"] is None else str(module12_results["critical_bolt"])),
+            ])
+
+    # --------------------------------------------------------
+    # 3. Gráficos
+    # --------------------------------------------------------
+    docx_add_heading(doc, "3. Gráficos relevantes", level=1)
+
+    image_paths = []
+
+    for key, fig in module14_figs.items():
+        img_path = save_figure_to_temp(fig, f"report_{key}")
+        image_paths.append((key, img_path))
+
+    captions = {
+        "uniaxial_pressure": "Distribución uniaxial de presión de contacto.",
+        "uniaxial_anchor_tension": "Distribución de tracción en pernos para el análisis uniaxial.",
+        "biaxial_elastic_pressure": "Mapa de presión biaxial elástica q(x,y).",
+        "biaxial_contact_pressure": "Mapa de presión de contacto positiva q⁺(x,y).",
+        "biaxial_anchor_tension": "Distribución refinada de tracción en pernos para el análisis biaxial.",
+    }
+
+    for key, path in image_paths:
+        if os.path.exists(path):
+            docx_add_image(doc, path, caption=captions.get(key, key))
+
+    # --------------------------------------------------------
+    # 4. Conclusión
+    # --------------------------------------------------------
+    docx_add_heading(doc, "4. Conclusión", level=1)
+
+    status = module13_results["global_status"]
+
+    if status == "Cumple":
+        conclusion = (
+            "Con base en las verificaciones realizadas, el diseño evaluado cumple los chequeos activos "
+            "del modelo implementado."
+        )
+    elif status == "Preliminarmente aceptable":
+        conclusion = (
+            "El diseño resulta preliminarmente aceptable, aunque requiere validación adicional en los "
+            "módulos todavía marcados como aproximados."
+        )
+    elif status == "Revisión requerida":
+        conclusion = (
+            "El diseño requiere revisión adicional. Existen chequeos que deben depurarse o complementarse "
+            "antes de adoptar el detalle como solución final."
+        )
+    else:
+        conclusion = (
+            "El diseño no cumple uno o más chequeos relevantes y debe modificarse."
+        )
+
+    docx_add_normal_paragraph(doc, conclusion)
+
+    if module13_results["critical_checks"]:
+        docx_add_heading(doc, "4.1 Chequeos críticos", level=2)
+        critical_rows = []
+        for row in module13_results["critical_checks"]:
+            critical_rows.append((
+                f"{row['Módulo']} - {row['Chequeo']}",
+                f"{row['Estado']} | {row['Nota']}"
+            ))
+        docx_add_key_value_table(doc, critical_rows)
+
+    # --------------------------------------------------------
+    # Guardar
+    # --------------------------------------------------------
+    file_path = os.path.join(tempfile.gettempdir(), "memoria_placa_base.docx")
+    doc.save(file_path)
+
+    return file_path
 # ============================================================
 # FUNCIONES DE GRÁFICO
 # ============================================================
@@ -4103,8 +4604,42 @@ try:
             st.pyplot(module14_figs["biaxial_anchor_tension"], clear_figure=True)
     with tab16:
         st.subheader("Resumen")
-        st.write("Esta pestaña puede reservarse para exportación futura o reporte compacto.")
 
+        st.write("Esta pestaña permite generar la memoria de cálculo en formato Word.")
+
+        if st.button("Generar memoria de cálculo en Word"):
+            report_path = module15_generate_word_report(
+                analysis_mode=analysis_mode,
+                loads=loads,
+                materials=materials,
+                column_plot=column_plot,
+                base_plate=base_plate,
+                anchors=anchors,
+                pedestal=pedestal,
+                module13_results=module13_results,
+                module14_figs=module14_figs,
+                module2_results=module2_results if analysis_mode == "Uniaxial" else None,
+                module4_results=module4_results if analysis_mode == "Uniaxial" else None,
+                module5_results=module5_results if analysis_mode == "Uniaxial" else None,
+                module6_results=module6_results if analysis_mode == "Uniaxial" else None,
+                module7_results=module7_results if analysis_mode == "Uniaxial" else None,
+                module8_results=module8_results if analysis_mode == "Uniaxial" else None,
+                module9_results=module9_results if analysis_mode == "Uniaxial" else None,
+                module10_results=module10_results if analysis_mode == "Uniaxial" else None,
+                module11_results=module11_results if analysis_mode == "Biaxial" else None,
+                module12_results=module12_results if analysis_mode == "Biaxial" else None,
+            )
+
+            st.success("Memoria generada correctamente.")
+
+            with open(report_path, "rb") as f:
+                st.download_button(
+                    label="Descargar memoria .docx",
+                    data=f,
+                    file_name="memoria_placa_base.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
+    
     with tab17:
         st.subheader("Estado del desarrollo")
         st.write("**Módulos activos:**")
@@ -4112,8 +4647,11 @@ try:
         st.write("- Rama biaxial: Módulos 11 y 12")
         st.write("- Cierre global: Módulo 13")
         st.write("- Gráficas automáticas: Módulo 14")
-        st.write("**Siguiente mejora recomendada:**")
-        st.write("- Módulo 15: memoria de cálculo en Word")
+        st.write("- Memoria en Word: Módulo 15")
+        st.write("**Siguientes mejoras recomendadas:**")
+        st.write("- Ecuaciones OMML nativas de Word")
+        st.write("- Exportación PDF")
+        st.write("- Refinamiento no lineal del biaxial")
 
 except Exception as exc:
     st.error(f"Error en los datos de entrada: {exc}")
